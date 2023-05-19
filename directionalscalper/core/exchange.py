@@ -39,6 +39,7 @@ class Exchange:
             exchange_params["password"] = self.passphrase
 
         self.exchange = exchange_class(exchange_params)
+        self.exchange.set_sandbox_mode(True)  # activates testnet mode
         #print(self.exchange.describe())  # Print the exchange properties
 
     def _get_symbols(self):
