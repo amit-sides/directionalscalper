@@ -33,7 +33,6 @@ class BybitHedgeStrategy(Strategy):
                 take_profit_orders.append((order['qty'], order['id']))
         return take_profit_orders
 
-
     def cancel_take_profit_orders(self, symbol, side):
         self.exchange.cancel_close_bybit(symbol, side)
 
@@ -112,10 +111,16 @@ class BybitHedgeStrategy(Strategy):
         wallet_exposure = self.config.wallet_exposure
         min_dist = self.config.min_distance
         min_vol = self.config.min_volume
+        current_leverage = self.exchange.get_current_leverage_bybit(symbol)
+        max_leverage = self.exchange.get_max_leverage_bybit(symbol)
 
         print("Setting up exchange")
         self.exchange.setup_exchange_bybit(symbol)
-        print("Set up exchange")
+
+        print("Setting leverage")
+        if current_leverage != max_leverage:
+            print(f"Current leverage is not at maximum. Setting leverage to maximum. Maximum is {max_leverage}")
+            self.exchange.set_leverage_bybit(max_leverage, symbol)
 
         while True:
             print(f"Bybit hedge strategy running")
@@ -145,11 +150,9 @@ class BybitHedgeStrategy(Strategy):
             print(f"Best ask: {best_ask_price}")
             print(f"Current price: {current_price}")
 
-            leverage = float(market_data["leverage"]) if market_data["leverage"] !=0 else 50.0
-
             max_trade_qty = round(
                 (float(dex_equity) * wallet_exposure / float(best_ask_price))
-                / (100 / leverage),
+                / (100 / max_leverage),
                 int(float(market_data["min_qty"])),
             )            
             
@@ -263,7 +266,7 @@ class BybitHedgeStrategy(Strategy):
                 if not math.isclose(total_existing_long_tp_qty, long_pos_qty):
                     try:
                         for _, existing_long_tp_id in existing_long_tps:
-                            self.cancel_take_profit_orders(symbol, "sell")
+                            self.exchange.cancel_take_profit_orders_bybit(symbol, "sell")  # Corrected side value to "sell"
                             print(f"Long take profit canceled")
                             time.sleep(0.05)
 
@@ -280,7 +283,7 @@ class BybitHedgeStrategy(Strategy):
                 if not math.isclose(total_existing_short_tp_qty, short_pos_qty):
                     try:
                         for _, existing_short_tp_id in existing_short_tps:
-                            self.cancel_take_profit_orders(symbol, "buy")
+                            self.exchange.cancel_take_profit_orders_bybit(symbol, "buy")  # Corrected side value to "buy"
                             print(f"Short take profit canceled")
                             time.sleep(0.05)
 
@@ -290,6 +293,41 @@ class BybitHedgeStrategy(Strategy):
                         time.sleep(0.05)
                     except Exception as e:
                         print(f"Error in placing short TP: {e}")
+
+
+            # if long_pos_qty > 0 and long_take_profit is not None:
+            #     existing_long_tps = self.get_open_take_profit_order_quantities(open_orders, "sell")
+            #     total_existing_long_tp_qty = sum(qty for qty, _ in existing_long_tps)
+            #     if not math.isclose(total_existing_long_tp_qty, long_pos_qty):
+            #         try:
+            #             for _, existing_long_tp_id in existing_long_tps:
+            #                 self.cancel_take_profit_orders(symbol, "long")
+            #                 print(f"Long take profit canceled")
+            #                 time.sleep(0.05)
+
+            #             print(f"Debug: Long Position Quantity {long_pos_qty}, Long Take Profit {long_take_profit}")
+            #             self.exchange.create_take_profit_order_bybit(symbol, "limit", "sell", long_pos_qty, long_take_profit, positionIdx=1, reduce_only=True)
+            #             print(f"Long take profit set at {long_take_profit}")
+            #             time.sleep(0.05)
+            #         except Exception as e:
+            #             print(f"Error in placing long TP: {e}")
+
+            # if short_pos_qty > 0 and short_take_profit is not None:
+            #     existing_short_tps = self.get_open_take_profit_order_quantities(open_orders, "buy")
+            #     total_existing_short_tp_qty = sum(qty for qty, _ in existing_short_tps)
+            #     if not math.isclose(total_existing_short_tp_qty, short_pos_qty):
+            #         try:
+            #             for _, existing_short_tp_id in existing_short_tps:
+            #                 self.cancel_take_profit_orders(symbol, "short")
+            #                 print(f"Short take profit canceled")
+            #                 time.sleep(0.05)
+
+            #             print(f"Debug: Short Position Quantity {short_pos_qty}, Short Take Profit {short_take_profit}")
+            #             self.exchange.create_take_profit_order_bybit(symbol, "limit", "buy", short_pos_qty, short_take_profit, positionIdx=2, reduce_only=True)
+            #             print(f"Short take profit set at {short_take_profit}")
+            #             time.sleep(0.05)
+            #         except Exception as e:
+            #             print(f"Error in placing short TP: {e}")
 
 
             # Cancel entries

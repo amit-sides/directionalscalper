@@ -116,6 +116,27 @@ class Exchange:
         response = self.exchange.contractPrivatePostLinearSwapApiV3SwapSwitchAccountType(body)
         return response
 
+    # Bybit
+    def get_current_leverage_bybit(self, symbol):
+        try:
+            positions = self.exchange.fetch_derivatives_positions([symbol])
+            if len(positions) > 0:
+                position = positions[0]
+                leverage = position['leverage']
+                print(f"Current leverage for symbol {symbol}: {leverage}")
+            else:
+                print(f"No positions found for symbol {symbol}")
+        except Exception as e:
+            print(f"Error retrieving current leverage: {e}")
+            
+    # Bybit
+    def set_leverage_bybit(self, leverage, symbol):
+        try:
+            self.exchange.set_leverage(leverage, symbol)
+            print(f"Leverage set to {leverage} for symbol {symbol}")
+        except Exception as e:
+            print(f"Error setting leverage: {e}")
+
     def setup_exchange_bybit(self, symbol) -> None:
         values = {"position": False, "leverage": False}
         try:
@@ -129,12 +150,9 @@ class Exchange:
         try:
             # Set the margin mode to cross
             self.exchange.set_derivatives_margin_mode(marginMode="cross", symbol=symbol)
-            
-            # Set the leverage to the maximum allowed
-            self.exchange.set_leverage(leverage=market_data["leverage"], symbol=symbol)
-            values["leverage"] = True
+
         except Exception as e:
-            log.warning(f"An unknown error occurred in with set_leverage: {e}")
+            log.warning(f"An unknown error occurred in with set_derivatives_margin_mode: {e}")
 
         log.info(values)
 
@@ -940,6 +958,15 @@ class Exchange:
         except Exception as e:
             log.warning(f"An unknown error occurred in cancel_entry(): {e}")
 
+    # Bybit
+    def get_max_leverage_bybit(self, symbol):
+        tiers = self.exchange.fetch_derivatives_market_leverage_tiers(symbol)
+        for tier in tiers:
+            info = tier.get('info', {})
+            if info.get('symbol') == symbol:
+                return float(info.get('maxLeverage'))
+        return None
+    
     # Bitget 
     def get_max_leverage_bitget(self, symbol):
         try:
@@ -1013,7 +1040,7 @@ class Exchange:
             if order['side'] == side:
                 return order['status']
 
-        return None  # Return None if the order is not found
+        return None
 
     # Bitget
     def cancel_entry_bitget(self, symbol: str) -> None:
@@ -1066,6 +1093,42 @@ class Exchange:
                         log.info(f"Cancelling order: {order_id}")
         except Exception as e:
             log.warning(f"An unknown error occurred in cancel_entry(): {e}")
+
+    # Bybit
+    def cancel_take_profit_orders_bybit(self, symbol, side):
+        try:
+            open_orders = self.exchange.fetch_open_orders(symbol)
+            position_idx_map = {"long": 1, "short": 2}
+            #print("Open Orders:", open_orders)
+            #print("Position Index Map:", position_idx_map)
+            for order in open_orders:
+                if (
+                    order['side'].lower() == side.lower()
+                    and order['info'].get('reduceOnly')
+                    and order['info'].get('positionIdx') == position_idx_map[side]
+                ):
+                    order_id = order['info']['orderId']
+                    self.exchange.cancel_derivatives_order(order_id, symbol)
+                    print(f"Canceled take profit order - ID: {order_id}")
+        except Exception as e:
+            print(f"An unknown error occurred in cancel_take_profit_orders: {e}")
+
+    # def cancel_take_profit_orders_bybit(self, symbol, side):
+    #     try:
+    #         open_orders = self.exchange.fetch_open_orders(symbol)
+    #         position_idx_map = {"long": 1, "short": 2}
+    #         position_idx_map = {"buy": 1, "sell": 2}
+    #         for order in open_orders:
+    #             if (
+    #                 order['side'].lower() == side.lower()
+    #                 and order['info'].get('reduceOnly')
+    #                 and order['info'].get('positionIdx') == position_idx_map[side]
+    #             ):
+    #                 order_id = order['info']['orderId']
+    #                 self.exchange.cancel_derivatives_order(order_id, symbol)
+    #                 print(f"Canceled take profit order - ID: {order_id}")
+    #     except Exception as e:
+    #         print(f"An unknown error occurred in cancel_take_profit_orders: {e}")
 
     def cancel_close_bybit(self, symbol: str, side: str) -> None:
         position_idx_map = {"long": 1, "short": 2}
