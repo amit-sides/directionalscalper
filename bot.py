@@ -22,6 +22,9 @@ from directionalscalper.core.strategies.bitget.bitget_grid_dynamic import Bitget
 from directionalscalper.core.strategies.bitget.bitget_fivemin import BitgetFiveMinuteStrategy
 from directionalscalper.core.strategies.okx.okx_hedge import OKXHedgeStrategy
 from directionalscalper.core.strategies.bybit.bybit_hedge import BybitHedgeStrategy
+from directionalscalper.core.strategies.bybit.bybit_violent import BybitViolentHedgeStrategy
+from directionalscalper.core.strategies.bybit.bybit_dynamic import BybitDynamicHedgeStrategy
+from directionalscalper.core.strategies.bybit.bybit_hedge_unified import BybitHedgeUnifiedStrategy
 from directionalscalper.core.strategies.bybit.bybit_hedge_grid import BybitHedgeGridStrategy
 from directionalscalper.core.strategies.huobi.huobi_hedge import HuobiHedgeStrategy
 from directionalscalper.core.strategies.binance.binance_hedge import BinanceHedgeStrategy
@@ -60,7 +63,7 @@ class DirectionalMarketMaker:
             #return self.exchange.get_balance_okx(quote)
             print(f"Unsupported for now")
         elif self.exchange_name == 'binance':
-            print(f"Unsupported for now")
+            return self.exchange.get_balance_binance(quote)
         elif self.exchange_name == 'phemex':
             print(f"Unsupported for now")
 
@@ -90,6 +93,7 @@ if __name__ == '__main__':
     print(f"Exchange name: {exchange_name}")
     print(f"Strategy name: {strategy_name}")
     print(f"Symbol: {symbol}")
+
 
     market_maker = DirectionalMarketMaker(config, exchange_name)
 
@@ -139,6 +143,18 @@ if __name__ == '__main__':
         elif strategy_name.lower() == 'bybit_hedge':
             strategy = BybitHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
             strategy.run(symbol, amount)
+
+        elif strategy_name.lower() == 'bybit_hedge_unified':
+            strategy = BybitHedgeUnifiedStrategy(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol, amount)
+
+        elif strategy_name.lower() == 'bybit_hedge_violent':
+            strategy = BybitHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
+        
+        elif strategy_name.lower() == 'bybit_hedge_dynamic':
+            strategy = BybitDynamicHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
 
         elif strategy_name.lower() == 'bybit_hedge_grid':
             strategy = BybitHedgeGridStrategy(market_maker.exchange, market_maker.manager, config.bot)
