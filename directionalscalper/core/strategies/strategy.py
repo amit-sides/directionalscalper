@@ -301,9 +301,17 @@ class Strategy:
             return 0
 
 
-class HedgeStrategy(Strategy):
-    # HedgeStrategy specific methods go here
+    def update_table(self):
+        # Clear the existing table rows
+        self.table.table.rows.clear()
 
-    def create_limit_order(self, symbol, side, amount, price):
-        # 
-        pass
+        # Add rows individually
+        self.table.add_row('Symbol', self.symbol)
+        self.table.add_row('Long pos qty', self.long_pos_qty)
+        self.table.add_row('Short pos qty', self.short_pos_qty)
+        self.table.add_row('Long upnl', self.long_upnl)
+        self.table.add_row('Short upnl', self.short_upnl)
+        self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
+        self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
+        self.table.add_row('Long take profit', self.long_take_profit)
+        self.table.add_row('Short Take profit', self.short_take_profit)

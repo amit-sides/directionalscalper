@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_DOWN
 from ..strategy import Strategy
 from typing import Tuple
 
-class BybitLongDynamicTP(Strategy):
+class BybitLongOnlyDynamic(Strategy):
     def __init__(self, exchange, manager, config):
         super().__init__(exchange, config, manager)
         self.manager = manager
@@ -28,10 +28,8 @@ class BybitLongDynamicTP(Strategy):
             # Reduce the position to the desired wallet exposure level
             self.exchange.reduce_position_bybit(symbol, reduction_qty)
 
-
     def truncate(self, number: float, precision: int) -> float:
         return float(Decimal(number).quantize(Decimal('0.' + '0'*precision), rounding=ROUND_DOWN))
-
 
     def limit_order(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
         params = {"reduceOnly": reduceOnly}
@@ -55,7 +53,7 @@ class BybitLongDynamicTP(Strategy):
     def cancel_take_profit_orders(self, symbol, side):
         self.exchange.cancel_close_bybit(symbol, side)
 
-    def run(self, symbol, amount):
+    def run(self, symbol):
         wallet_exposure = self.config.wallet_exposure
         min_dist = self.config.min_distance
         min_vol = self.config.min_volume
@@ -120,16 +118,36 @@ class BybitLongDynamicTP(Strategy):
             
             print(f"Max trade quantity for {symbol}: {max_trade_qty}")
 
-            min_qty_bybit = market_data["min_qty"]
-            print(f"Min qty: {min_qty_bybit}")
+            # Calculate the dynamic amount
+            amount = 0.001 * max_trade_qty
+
+            min_qty = float(market_data["min_qty"])
+            min_qty_str = str(min_qty)
+
+            # Get the precision level of the minimum quantity
+            if ".0" in min_qty_str:
+                # The minimum quantity does not have a fractional part, precision is 0
+                precision_level = 0
+            else:
+                # The minimum quantity has a fractional part, get its precision level
+                precision_level = len(min_qty_str.split(".")[1])
+
+            # Calculate the dynamic amount
+            amount = 0.001 * max_trade_qty
+
+            # Round the amount to the precision level of the minimum quantity
+            amount = round(amount, precision_level)
+
+            print(f"Dynamic amount: {amount}")
+
+            # Check if the amount is less than the minimum quantity allowed by the exchange
+            if amount < min_qty:
+                print(f"Dynamic amount too small for 0.001x, using min_qty")
+                amount = min_qty
 
             self.check_amount_validity_bybit(amount, symbol)
 
             self.print_trade_quantities_once_bybit(max_trade_qty)
-
-            if not self.printed_trade_quantities:
-                self.exchange.print_trade_quantities_bybit(max_trade_qty, [0.001, 0.01, 0.1, 1, 2.5, 5], wallet_exposure, best_ask_price)
-                self.printed_trade_quantities = True
 
             # Get the 1-minute moving averages
             print(f"Fetching MA data")
