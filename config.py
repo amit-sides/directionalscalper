@@ -32,7 +32,6 @@ class Bot(BaseModel):
     symbol: str
     violent_multiplier: float = 2.00
     wallet_exposure: float = 1.00
-    wallet_exposure_limit: float = 0.01
 
     @validator("min_volume")
     def minimum_min_volume(cls, v):
@@ -69,7 +68,6 @@ class Logger(BaseModel):
             raise ValueError(f"Log level must be in {levels}")
         return v
 
-
 class Discord(BaseModel):
     active: bool = False
     embedded_messages: bool = True
@@ -78,11 +76,26 @@ class Discord(BaseModel):
 
     @validator("webhook_url")
     def minimum_divider(cls, v):
-        if not v.startswith("https://discord.com/api/webhooks/"):
+        if not str(v).startswith("https://discord.com/api/webhooks/"):
             raise ValueError(
                 "Discord webhook begins: https://discord.com/api/webhooks/"
             )
         return v
+
+# class Discord(BaseModel):
+#     active: bool = False
+#     embedded_messages: bool = True
+#     messenger_type: str = Messengers.DISCORD.value  # type: ignore
+#     webhook_url: HttpUrl
+
+#     @validator("webhook_url")
+#     def minimum_divider(cls, v):
+#         if not v.startswith("https://discord.com/api/webhooks/"):
+#             raise ValueError(
+#                 "Discord webhook begins: https://discord.com/api/webhooks/"
+#             )
+#         return v
+
 
 
 class Telegram(BaseModel):

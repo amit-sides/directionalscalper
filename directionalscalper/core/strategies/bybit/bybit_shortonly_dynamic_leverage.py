@@ -4,13 +4,19 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_DOWN
 from ..strategy import Strategy
 from typing import Tuple
 
-class BybitShortOnlyDynamic(Strategy):
+class BybitShortOnlyDynamicLeverage(Strategy):
     def __init__(self, exchange, manager, config):
         super().__init__(exchange, config, manager)
         self.manager = manager
         self.last_cancel_time = 0
         self.current_wallet_exposure = 1.0
         self.printed_trade_quantities = False
+        self.checked_amount_validity = False
+        self.max_long_trade_qty = None
+        self.max_short_trade_qty = None
+        self.initial_max_long_trade_qty = None
+        self.initial_max_short_trade_qty = None
+        self.short_leverage_increased = False
 
     def run(self, symbol):
         wallet_exposure = self.config.wallet_exposure
@@ -29,20 +35,27 @@ class BybitShortOnlyDynamic(Strategy):
             print(f"Current leverage is not at maximum. Setting leverage to maximum. Maximum is {max_leverage}")
             self.exchange.set_leverage_bybit(max_leverage, symbol)
 
+        previous_five_minute_distance = None
+        previous_thirty_minute_distance = None
+        previous_one_hour_distance = None
+        previous_four_hour_distance = None
+
         while True:
-            print(f"Bybit short only strategy running")
+            print(f"Bybit short only dynamic leverage strategy running")
             print(f"Min volume: {min_vol}")
             print(f"Min distance: {min_dist}")
 
             # Get API data
             data = self.manager.get_data()
             one_minute_volume = self.manager.get_asset_value(symbol, data, "1mVol")
+            one_minute_distance = self.manager.get_asset_value(symbol, data, "1mSpread")
             five_minute_distance = self.manager.get_asset_value(symbol, data, "5mSpread")
             thirty_minute_distance = self.manager.get_asset_value(symbol, data, "30mSpread")
             one_hour_distance = self.manager.get_asset_value(symbol, data, "1hSpread")
             four_hour_distance = self.manager.get_asset_value(symbol, data, "4hSpread")
             trend = self.manager.get_asset_value(symbol, data, "Trend")
             print(f"1m Volume: {one_minute_volume}")
+            print(f"1m Spread: {one_minute_distance}")
             print(f"5m Spread: {five_minute_distance}")
             print(f"30m Spread: {thirty_minute_distance}")
             print(f"1h Spread: {one_hour_distance}")
@@ -64,6 +77,20 @@ class BybitShortOnlyDynamic(Strategy):
                     
             print(f"Total equity: {total_equity}")
 
+            for i in range(max_retries):
+                try:
+                    available_equity = self.exchange.get_available_balance_bybit(quote_currency)
+                    break
+                except Exception as e:
+                    if i < max_retries - 1:
+                        print(f"Error occurred while fetching available balance: {e}. Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                    else:
+                        raise e
+            
+            print(f"Available equity: {available_equity}")
+
+
             current_price = self.exchange.get_current_price(symbol)
             market_data = self.get_market_data_with_retry(symbol, max_retries = 5, retry_delay = 5)
             best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
@@ -73,15 +100,25 @@ class BybitShortOnlyDynamic(Strategy):
             print(f"Best ask: {best_ask_price}")
             print(f"Current price: {current_price}")
 
+            if self.max_short_trade_qty is None:
+                self.max_short_trade_qty = self.calc_max_trade_qty(total_equity,
+                                                                                             best_ask_price,
+                                                                                             max_leverage)
+
+                # Set initial quantities if they're None
+                if self.initial_max_short_trade_qty is None:
+                    self.initial_max_short_trade_qty = self.max_short_trade_qty  
+                    print(f"Initial trade qty set to {self.initial_max_short_trade_qty}")                                                            
+                      
+
             max_trade_qty = self.calc_max_trade_qty(total_equity,
                                                      best_ask_price,
                                                      max_leverage)   
             
             print(f"Max trade quantity for {symbol}: {max_trade_qty}")
 
-            # Calculate the dynamic amount
-            amount = 0.001 * max_trade_qty
-
+            short_dynamic_amount = 0.001 * self.initial_max_short_trade_qty
+    
             min_qty = float(market_data["min_qty"])
             min_qty_str = str(min_qty)
 
@@ -93,22 +130,29 @@ class BybitShortOnlyDynamic(Strategy):
                 # The minimum quantity has a fractional part, get its precision level
                 precision_level = len(min_qty_str.split(".")[1])
 
-            # Calculate the dynamic amount
-            amount = 0.001 * max_trade_qty
-
             # Round the amount to the precision level of the minimum quantity
-            amount = round(amount, precision_level)
+            short_dynamic_amount = round(short_dynamic_amount, precision_level)
 
-            print(f"Dynamic amount: {amount}")
+            print(f"Short dynamic amount: {short_dynamic_amount}")
+
+            self.check_amount_validity_once_bybit(short_dynamic_amount, symbol)
+
+            self.print_trade_quantities_once_bybit(self.max_short_trade_qty)
+
 
             # Check if the amount is less than the minimum quantity allowed by the exchange
-            if amount < min_qty:
+            if short_dynamic_amount < min_qty:
                 print(f"Dynamic amount too small for 0.001x, using min_qty")
-                amount = min_qty
+                short_dynamic_amount = min_qty
 
-            self.check_amount_validity_bybit(amount, symbol)
+            print(f"Min qty: {min_qty}")
 
-            self.print_trade_quantities_once_bybit(max_trade_qty)
+            print(f"Dynamic amount: {short_dynamic_amount}")
+
+            # Check if the amount is less than the minimum quantity allowed by the exchange
+            if short_dynamic_amount < min_qty:
+                print(f"Dynamic amount too small for 0.001x, using min_qty")
+                short_dynamic_amount = min_qty
 
             # Get the 1-minute moving averages
             print(f"Fetching MA data")
@@ -126,6 +170,22 @@ class BybitShortOnlyDynamic(Strategy):
 
             print(f"Short pos qty: {short_pos_qty}")
 
+            if short_pos_qty >= self.max_short_trade_qty:
+                self.max_short_trade_qty *= 2  # double the maximum short trade quantity
+                print(f"Short leverage temporarily increased to 2x")
+                self.short_leverage_increased = True
+            elif short_pos_qty < self.max_short_trade_qty:
+                self.max_short_trade_qty = self.calc_max_trade_qty(total_equity,
+                                                                   best_ask_price,
+                                                                   max_leverage)
+                print(f"Short leverage returned to normal 1x")
+                self.short_leverage_increased = False
+
+            if self.short_leverage_increased:
+                print(f"Short position currently increased to 2x")
+            else:
+                print(f"Short position currently at normal leverage 1x")
+
             short_upnl = position_data["short"]["upnl"]
 
             print(f"Short uPNL: {short_upnl}")
@@ -140,8 +200,17 @@ class BybitShortOnlyDynamic(Strategy):
 
             #print(f"Bybit pos data: {position_data}")
 
-            # Take profit calc
-            short_take_profit = self.calculate_short_take_profit_spread_bybit(short_pos_price, symbol, five_minute_distance)
+            short_take_profit = None
+
+            if five_minute_distance != previous_five_minute_distance:
+                short_take_profit = self.calculate_short_take_profit_spread_bybit(short_pos_price, symbol, five_minute_distance)
+            else:
+                if short_take_profit is None:
+                    short_take_profit = self.calculate_long_take_profit_spread_bybit(short_pos_price, symbol, five_minute_distance)
+                    
+            previous_five_minute_distance = five_minute_distance
+
+            print(f"Short TP: {short_take_profit}")
 
             should_short = best_bid_price > ma_3_high
 
@@ -163,12 +232,12 @@ class BybitShortOnlyDynamic(Strategy):
 
                         if trend.lower() == "short" and should_short and short_pos_qty == 0:
                             print(f"Placing initial short entry")
-                            self.limit_order_bybit(symbol, "sell", amount, best_ask_price, positionIdx=2, reduceOnly=False)
+                            self.limit_order_bybit(symbol, "sell", short_dynamic_amount, best_ask_price, positionIdx=2, reduceOnly=False)
                             print("Placed initial short entry")
                         else:
                             if trend.lower() == "short" and should_add_to_short and short_pos_qty < max_trade_qty and best_ask_price > short_pos_price:
                                 print(f"Placed additional short entry")
-                                self.limit_order_bybit(symbol, "sell", amount, best_bid_price, positionIdx=2, reduceOnly=False)
+                                self.limit_order_bybit(symbol, "sell", short_dynamic_amount, best_bid_price, positionIdx=2, reduceOnly=False)
         
             open_orders = self.exchange.get_open_orders(symbol)
 

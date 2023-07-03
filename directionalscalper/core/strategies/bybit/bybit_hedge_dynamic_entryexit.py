@@ -13,46 +13,6 @@ class BybitHedgeEntryExitDynamic(Strategy):
         self.current_wallet_exposure = 1.0
         self.printed_trade_quantities = False
 
-    def calculate_trade_quantity(self, symbol, leverage):
-        dex_equity = self.exchange.get_balance_bybit('USDT')
-        trade_qty = (float(dex_equity) * self.current_wallet_exposure) / leverage
-        return trade_qty
-
-    def adjust_position_wallet_exposure(self, symbol):
-        if self.current_wallet_exposure > self.wallet_exposure_limit:
-            desired_wallet_exposure = self.wallet_exposure_limit
-            # Calculate the necessary position size to achieve the desired wallet exposure
-            max_trade_qty = self.calculate_trade_quantity(symbol, 1)
-            current_trade_qty = self.calculate_trade_quantity(symbol, 1 / self.current_wallet_exposure)
-            reduction_qty = current_trade_qty - max_trade_qty
-            # Reduce the position to the desired wallet exposure level
-            self.exchange.reduce_position_bybit(symbol, reduction_qty)
-
-    def truncate(self, number: float, precision: int) -> float:
-        return float(Decimal(number).quantize(Decimal('0.' + '0'*precision), rounding=ROUND_DOWN))
-
-    def limit_order(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
-        params = {"reduceOnly": reduceOnly}
-        #print(f"Symbol: {symbol}, Side: {side}, Amount: {amount}, Price: {price}, Params: {params}")
-        order = self.exchange.create_limit_order_bybit(symbol, side, amount, price, positionIdx=positionIdx, params=params)
-        return order
-
-    def get_open_take_profit_order_quantity(self, orders, side):
-        for order in orders:
-            if order['side'].lower() == side.lower() and order['reduce_only']:
-                return order['qty'], order['id']
-        return None, None
-
-    def get_open_take_profit_order_quantities(self, orders, side):
-        take_profit_orders = []
-        for order in orders:
-            if order['side'].lower() == side.lower() and order['reduce_only']:
-                take_profit_orders.append((order['qty'], order['id']))
-        return take_profit_orders
-
-    def cancel_take_profit_orders(self, symbol, side):
-        self.exchange.cancel_close_bybit(symbol, side)
-
     def run(self, symbol):
         wallet_exposure = self.config.wallet_exposure
         min_dist = self.config.min_distance
@@ -83,12 +43,14 @@ class BybitHedgeEntryExitDynamic(Strategy):
             # Get API data
             data = self.manager.get_data()
             one_minute_volume = self.manager.get_asset_value(symbol, data, "1mVol")
+            one_minute_distance = self.manager.get_asset_value(symbol, data, "1mSpread")
             five_minute_distance = self.manager.get_asset_value(symbol, data, "5mSpread")
             thirty_minute_distance = self.manager.get_asset_value(symbol, data, "30mSpread")
             one_hour_distance = self.manager.get_asset_value(symbol, data, "1hSpread")
             four_hour_distance = self.manager.get_asset_value(symbol, data, "4hSpread")
             trend = self.manager.get_asset_value(symbol, data, "Trend")
             print(f"1m Volume: {one_minute_volume}")
+            print(f"1m Spread: {one_minute_distance}")
             print(f"5m Spread: {five_minute_distance}")
             print(f"30m Spread: {thirty_minute_distance}")
             print(f"1h Spread: {one_hour_distance}")
@@ -113,6 +75,19 @@ class BybitHedgeEntryExitDynamic(Strategy):
                         raise e
                     
             print(f"Total equity: {total_equity}")
+
+            for i in range(max_retries):
+                try:
+                    available_equity = self.exchange.get_available_balance_bybit(quote_currency)
+                    break
+                except Exception as e:
+                    if i < max_retries - 1:
+                        print(f"Error occurred while fetching available balance: {e}. Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                    else:
+                        raise e
+
+            print(f"Available equity: {available_equity}")
 
             current_price = self.exchange.get_current_price(symbol)
             market_data = self.get_market_data_with_retry(symbol, max_retries = 5, retry_delay = 5)
@@ -210,6 +185,9 @@ class BybitHedgeEntryExitDynamic(Strategy):
             print(f"Long pos price {long_pos_price}")
             print(f"Short pos price {short_pos_price}")
 
+            short_take_profit = None
+            long_take_profit = None
+
             if five_minute_distance != previous_five_minute_distance:
                 short_take_profit = self.calculate_short_take_profit_spread_bybit(short_pos_price, symbol, five_minute_distance)
                 long_take_profit = self.calculate_long_take_profit_spread_bybit(long_pos_price, symbol, five_minute_distance)
@@ -224,7 +202,7 @@ class BybitHedgeEntryExitDynamic(Strategy):
             print(f"Long TP: {long_take_profit}")
 
             should_short = self.short_trade_condition(best_bid_price, ma_3_high)
-            should_long = self.long_trade_condition(best_bid_price, ma_3_low)
+            should_long = self.long_trade_condition(best_bid_price, ma_3_high)
 
             should_add_to_short = False
             should_add_to_long = False
@@ -252,21 +230,21 @@ class BybitHedgeEntryExitDynamic(Strategy):
 
                         if trend.lower() == "long" and should_long and long_pos_qty == 0:
                             print(f"Placing initial long entry")
-                            self.limit_order(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
+                            self.limit_order_bybit(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
                             print(f"Placed initial long entry")
                         else:
                             if trend.lower() == "long" and should_add_to_long and long_pos_qty < max_trade_qty and best_bid_price < long_pos_price:
                                 print(f"Placed additional long entry")
-                                self.limit_order(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
+                                self.limit_order_bybit(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
 
                         if trend.lower() == "short" and should_short and short_pos_qty == 0:
                             print(f"Placing initial short entry")
-                            self.limit_order(symbol, "sell", amount, best_ask_price, positionIdx=2, reduceOnly=False)
+                            self.limit_order_bybit(symbol, "sell", amount, best_ask_price, positionIdx=2, reduceOnly=False)
                             print("Placed initial short entry")
                         else:
                             if trend.lower() == "short" and should_add_to_short and short_pos_qty < max_trade_qty and best_ask_price > short_pos_price:
                                 print(f"Placed additional short entry")
-                                self.limit_order(symbol, "sell", amount, best_bid_price, positionIdx=2, reduceOnly=False)
+                                self.limit_order_bybit(symbol, "sell", amount, best_bid_price, positionIdx=2, reduceOnly=False)
         
             open_orders = self.exchange.get_open_orders(symbol)
 

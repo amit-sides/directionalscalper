@@ -10,6 +10,34 @@ class Strategy:
         self.symbol = config.symbol
         self.printed_trade_quantities = False
 
+    def limit_order_bybit_unified(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
+        params = {"reduceOnly": reduceOnly}
+        #print(f"Symbol: {symbol}, Side: {side}, Amount: {amount}, Price: {price}, Params: {params}")
+        order = self.exchange.create_limit_order_bybit_unified(symbol, side, amount, price, positionIdx=positionIdx, params=params)
+        return order
+    
+    def limit_order_bybit(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
+        params = {"reduceOnly": reduceOnly}
+        #print(f"Symbol: {symbol}, Side: {side}, Amount: {amount}, Price: {price}, Params: {params}")
+        order = self.exchange.create_limit_order_bybit(symbol, side, amount, price, positionIdx=positionIdx, params=params)
+        return order
+
+    def get_open_take_profit_order_quantity(self, orders, side):
+        for order in orders:
+            if order['side'].lower() == side.lower() and order['reduce_only']:
+                return order['qty'], order['id']
+        return None, None
+
+    def get_open_take_profit_order_quantities(self, orders, side):
+        take_profit_orders = []
+        for order in orders:
+            if order['side'].lower() == side.lower() and order['reduce_only']:
+                take_profit_orders.append((order['qty'], order['id']))
+        return take_profit_orders
+
+    def cancel_take_profit_orders(self, symbol, side):
+        self.exchange.cancel_close_bybit(symbol, side)
+
     def calculate_short_conditions(self, short_pos_price, ma_6_low, short_take_profit, short_pos_qty):
         if short_pos_price is not None:
             should_add_to_short = short_pos_price < ma_6_low
@@ -70,15 +98,37 @@ class Strategy:
                 else:
                     raise e
 
-    def calc_max_trade_qty(self, total_equity, best_ask_price, max_leverage):
+    def calc_max_trade_qty(self, total_equity, best_ask_price, max_leverage, max_retries=5, retry_delay=5):
         wallet_exposure = self.config.wallet_exposure
-        market_data = self.exchange.get_market_data_bybit(self.symbol)
-        max_trade_qty = round(
-            (float(total_equity) * wallet_exposure / float(best_ask_price))
-            / (100 / max_leverage),
-            int(float(market_data["min_qty"])),
-        )
-        return max_trade_qty
+        for i in range(max_retries):
+            try:
+                market_data = self.exchange.get_market_data_bybit(self.symbol)
+                max_trade_qty = round(
+                    (float(total_equity) * wallet_exposure / float(best_ask_price))
+                    / (100 / max_leverage),
+                    int(float(market_data["min_qty"])),
+                )
+                return max_trade_qty
+            except TypeError as e:
+                if total_equity is None:
+                    print(f"Error: total_equity is None. Retrying in {retry_delay} seconds...")
+                if best_ask_price is None:
+                    print(f"Error: best_ask_price is None. Retrying in {retry_delay} seconds...")
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}. Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+
+        raise Exception("Failed to calculate maximum trade quantity after maximum retries.")
+
+    # def calc_max_trade_qty(self, total_equity, best_ask_price, max_leverage):
+    #     wallet_exposure = self.config.wallet_exposure
+    #     market_data = self.exchange.get_market_data_bybit(self.symbol)
+    #     max_trade_qty = round(
+    #         (float(total_equity) * wallet_exposure / float(best_ask_price))
+    #         / (100 / max_leverage),
+    #         int(float(market_data["min_qty"])),
+    #     )
+    #     return max_trade_qty
 
     def check_amount_validity_bybit(self, amount, symbol):
         market_data = self.exchange.get_market_data_bybit(symbol)
@@ -89,6 +139,17 @@ class Strategy:
         else:
             print(f"The amount you entered ({amount}) is valid for {symbol}")
             return True
+
+    def check_amount_validity_once_bybit(self, amount, symbol):
+        if not self.check_amount_validity_bybit:
+            market_data = self.exchange.get_market_data_bybit(symbol)
+            min_qty_bybit = market_data["min_qty"]
+            if float(amount) < min_qty_bybit:
+                print(f"The amount you entered ({amount}) is less than the minimum required by Bybit for {symbol}: {min_qty_bybit}.")
+                return False
+            else:
+                print(f"The amount you entered ({amount}) is valid for {symbol}")
+                return True
 
     def print_trade_quantities_once_bybit(self, max_trade_qty):
         if not self.printed_trade_quantities:
@@ -300,18 +361,211 @@ class Strategy:
         else:
             return 0
 
+    def calculate_trade_quantity(self, symbol, leverage):
+        dex_equity = self.exchange.get_balance_bybit('USDT')
+        trade_qty = (float(dex_equity) * self.current_wallet_exposure) / leverage
+        return trade_qty
+
+    def adjust_position_wallet_exposure(self, symbol):
+        if self.current_wallet_exposure > self.wallet_exposure_limit:
+            desired_wallet_exposure = self.wallet_exposure_limit
+            # Calculate the necessary position size to achieve the desired wallet exposure
+            max_trade_qty = self.calculate_trade_quantity(symbol, 1)
+            current_trade_qty = self.calculate_trade_quantity(symbol, 1 / self.current_wallet_exposure)
+            reduction_qty = current_trade_qty - max_trade_qty
+            # Reduce the position to the desired wallet exposure level
+            self.exchange.reduce_position_bybit(symbol, reduction_qty)
+
+    def truncate(self, number: float, precision: int) -> float:
+        return float(Decimal(number).quantize(Decimal('0.' + '0'*precision), rounding=ROUND_DOWN))
+
+    def format_symbol(self, symbol):
+        """
+        Format the given symbol string to include a '/' between the base and quote currencies.
+        The function handles base currencies of 3 to 4 characters and quote currencies of 3 to 4 characters.
+        """
+        quote_currencies = ["USDT", "USD", "BTC", "ETH"]
+        for quote in quote_currencies:
+            if symbol.endswith(quote):
+                base = symbol[:-len(quote)]
+                return base + '/' + quote
+        return None
+
+
+    # def update_table(self):
+    #     print("Acquiring lock and updating table...")
+    #     with self.table.lock:  # acquire the lock
+    #         # Clear the existing table rows
+    #         self.table.table.rows.clear()
+
+    #         # Add rows individually
+    #         print(f'Symbol: {self.symbol}')  # print before adding
+    #         self.table.add_row('Symbol', self.symbol)
+
+    #         print(f'Long pos qty: {self.long_pos_qty}')
+    #         self.table.add_row('Long pos qty', self.long_pos_qty)
+
+    #         print(f'Short pos qty: {self.short_pos_qty}')
+    #         self.table.add_row('Short pos qty', self.short_pos_qty)
+
+    #         print(f'Long upnl: {self.long_upnl}')
+    #         self.table.add_row('Long upnl', self.long_upnl)
+
+    #         print(f'Short upnl: {self.short_upnl}')
+    #         self.table.add_row('Short upnl', self.short_upnl)
+
+    #         print(f'Long cum pnl: {self.cum_realised_pnl_long}')
+    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
+
+    #         print(f'Short cum pnl: {self.cum_realised_pnl_short}')
+    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
+
+    #         print(f'Long take profit: {self.long_take_profit}')
+    #         self.table.add_row('Long take profit', self.long_take_profit)
+
+    #         print(f'Short Take profit: {self.short_take_profit}')
+    #         self.table.add_row('Short Take profit', self.short_take_profit)
+    #     print("Table updated, lock released.")
+
+    # def update_table(self):
+    #     print("Acquiring lock and updating table...")
+    #     with self.table.lock:  # acquire the lock
+    #         # Clear the existing table rows
+    #         self.table.table.rows.clear()
+
+    #         # Add rows individually
+    #         self.table.add_row('Symbol', self.symbol)
+    #         self.table.add_row('Long pos qty', self.long_pos_qty)
+    #         self.table.add_row('Short pos qty', self.short_pos_qty)
+    #         self.table.add_row('Long upnl', self.long_upnl)
+    #         self.table.add_row('Short upnl', self.short_upnl)
+    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
+    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
+    #         self.table.add_row('Long take profit', self.long_take_profit)
+    #         self.table.add_row('Short Take profit', self.short_take_profit)
+    #     print("Table updated, lock released.")
+
+
+    # def update_table(self):
+    #     with self.table.lock:  # acquire the lock
+    #         # Clear the existing table rows
+    #         self.table.table.rows.clear()
+
+    #         # Add rows individually
+    #         self.table.add_row('Symbol', self.symbol)
+    #         self.table.add_row('Long pos qty', self.long_pos_qty)
+    #         self.table.add_row('Short pos qty', self.short_pos_qty)
+    #         self.table.add_row('Long upnl', self.long_upnl)
+    #         self.table.add_row('Short upnl', self.short_upnl)
+    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
+    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
+    #         self.table.add_row('Long take profit', self.long_take_profit)
+    #         self.table.add_row('Short Take profit', self.short_take_profit)
+
+### WORKING ###
+    # def update_table(self):
+    #     # Clear the existing table rows
+    #     self.table.table.rows.clear()
+
+    #     # Add rows individually
+    #     self.table.add_row('Symbol', self.symbol)
+    #     self.table.add_row('Long pos qty', self.long_pos_qty)
+    #     self.table.add_row('Short pos qty', self.short_pos_qty)
+    #     self.table.add_row('Long upnl', self.long_upnl)
+    #     self.table.add_row('Short upnl', self.short_upnl)
+    #     self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
+    #     self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
+    #     self.table.add_row('Long take profit', self.long_take_profit)
+    #     self.table.add_row('Short Take profit', self.short_take_profit)
+
+
+    # def update_table(self):
+    #     # Clear the existing table rows
+    #     self.table.table.rows.clear()
+
+    #     # Add rows individually
+    #     self.table.add_row('Symbol', self.symbol if self.symbol is not None else 'N/A')
+    #     self.table.add_row('Long pos qty', self.long_pos_qty if self.long_pos_qty is not None else 'N/A')
+    #     self.table.add_row('Short pos qty', self.short_pos_qty if self.short_pos_qty is not None else 'N/A')
+    #     self.table.add_row('Long upnl', self.long_upnl if self.long_upnl is not None else 'N/A')
+    #     self.table.add_row('Short upnl', self.short_upnl if self.short_upnl is not None else 'N/A')
+    #     self.table.add_row('Long cum pnl', self.cum_realised_pnl_long if self.cum_realised_pnl_long is not None else 'N/A')
+    #     self.table.add_row('Short cum pnl', self.cum_realised_pnl_short if self.cum_realised_pnl_short is not None else 'N/A')
+    #     self.table.add_row('Long take profit', self.long_take_profit if self.long_take_profit is not None else 'N/A')
+    #     self.table.add_row('Short Take profit', self.short_take_profit if self.short_take_profit is not None else 'N/A')
+
+    # def update_table(self):
+    #     # Clear the existing table rows
+    #     self.table.table.rows.clear()
+
+    #     # Add rows individually
+    #     try:
+    #         self.table.add_row('Symbol', self.symbol if self.symbol is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Symbol': {e}")
+
+    #     try:
+    #         self.table.add_row('Long pos qty', self.long_pos_qty if self.long_pos_qty is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Long pos qty': {e}")
+
+    #     try:
+    #         self.table.add_row('Short pos qty', self.short_pos_qty if self.short_pos_qty is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Short pos qty': {e}")
+
+    #     try:
+    #         self.table.add_row('Long upnl', self.long_upnl if self.long_upnl is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Long upnl': {e}")
+
+    #     try:
+    #         self.table.add_row('Short upnl', self.short_upnl if self.short_upnl is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Short upnl': {e}")
+
+    #     try:
+    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long if self.cum_realised_pnl_long is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Long cum pnl': {e}")
+
+    #     try:
+    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short if self.cum_realised_pnl_short is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Short cum pnl': {e}")
+
+    #     try:
+    #         self.table.add_row('Long take profit', self.long_take_profit if self.long_take_profit is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Long take profit': {e}")
+
+    #     try:
+    #         self.table.add_row('Short Take profit', self.short_take_profit if self.short_take_profit is not None else 'N/A')
+    #     except Exception as e:
+    #         print(f"Error updating 'Short Take profit': {e}")
 
     def update_table(self):
+        print("Updating table...")
         # Clear the existing table rows
         self.table.table.rows.clear()
 
         # Add rows individually
-        self.table.add_row('Symbol', self.symbol)
-        self.table.add_row('Long pos qty', self.long_pos_qty)
-        self.table.add_row('Short pos qty', self.short_pos_qty)
-        self.table.add_row('Long upnl', self.long_upnl)
-        self.table.add_row('Short upnl', self.short_upnl)
-        self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
-        self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
-        self.table.add_row('Long take profit', self.long_take_profit)
-        self.table.add_row('Short Take profit', self.short_take_profit)
+        rows = [
+            ('Symbol', self.symbol),
+            ('Long pos qty', self.long_pos_qty),
+            ('Short pos qty', self.short_pos_qty),
+            ('Long upnl', self.long_upnl),
+            ('Short upnl', self.short_upnl),
+            ('Long cum pnl', self.cum_realised_pnl_long),
+            ('Short cum pnl', self.cum_realised_pnl_short),
+            ('Long take profit', self.long_take_profit),
+            ('Short Take profit', self.short_take_profit),
+        ]
+
+        for label, value in rows:
+            try:
+                print(f"Adding row: {label}")
+                self.table.add_row(label, value if value is not None else 'N/A')
+            except Exception as e:
+                print(f"Error updating '{label}': {e}")
+        print("Finished updating table.")

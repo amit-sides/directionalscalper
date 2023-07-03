@@ -9,49 +9,8 @@ class BybitLongOnlyDynamic(Strategy):
         super().__init__(exchange, config, manager)
         self.manager = manager
         self.last_cancel_time = 0
-        self.wallet_exposure_limit = self.config.wallet_exposure_limit
         self.current_wallet_exposure = 1.0
         self.printed_trade_quantities = False
-
-    def calculate_trade_quantity(self, symbol, leverage):
-        dex_equity = self.exchange.get_balance_bybit('USDT')
-        trade_qty = (float(dex_equity) * self.current_wallet_exposure) / leverage
-        return trade_qty
-
-    def adjust_position_wallet_exposure(self, symbol):
-        if self.current_wallet_exposure > self.wallet_exposure_limit:
-            desired_wallet_exposure = self.wallet_exposure_limit
-            # Calculate the necessary position size to achieve the desired wallet exposure
-            max_trade_qty = self.calculate_trade_quantity(symbol, 1)
-            current_trade_qty = self.calculate_trade_quantity(symbol, 1 / self.current_wallet_exposure)
-            reduction_qty = current_trade_qty - max_trade_qty
-            # Reduce the position to the desired wallet exposure level
-            self.exchange.reduce_position_bybit(symbol, reduction_qty)
-
-    def truncate(self, number: float, precision: int) -> float:
-        return float(Decimal(number).quantize(Decimal('0.' + '0'*precision), rounding=ROUND_DOWN))
-
-    def limit_order(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
-        params = {"reduceOnly": reduceOnly}
-        #print(f"Symbol: {symbol}, Side: {side}, Amount: {amount}, Price: {price}, Params: {params}")
-        order = self.exchange.create_limit_order_bybit(symbol, side, amount, price, positionIdx=positionIdx, params=params)
-        return order
-
-    def get_open_take_profit_order_quantity(self, orders, side):
-        for order in orders:
-            if order['side'].lower() == side.lower() and order['reduce_only']:
-                return order['qty'], order['id']
-        return None, None
-
-    def get_open_take_profit_order_quantities(self, orders, side):
-        take_profit_orders = []
-        for order in orders:
-            if order['side'].lower() == side.lower() and order['reduce_only']:
-                take_profit_orders.append((order['qty'], order['id']))
-        return take_profit_orders
-
-    def cancel_take_profit_orders(self, symbol, side):
-        self.exchange.cancel_close_bybit(symbol, side)
 
     def run(self, symbol):
         wallet_exposure = self.config.wallet_exposure
@@ -180,7 +139,7 @@ class BybitLongOnlyDynamic(Strategy):
             print(f"Long pos price {long_pos_price}")
 
             # Take profit calc
-            long_take_profit = self.calculate_long_take_profit_spread_bybit(long_pos_price, symbol, thirty_minute_distance)
+            long_take_profit = self.calculate_long_take_profit_spread_bybit(long_pos_price, symbol, five_minute_distance)
 
             should_short = best_bid_price > ma_3_high
             should_long = best_bid_price < ma_3_high
@@ -204,12 +163,12 @@ class BybitLongOnlyDynamic(Strategy):
 
                         if trend.lower() == "long" and should_long and long_pos_qty == 0:
                             print(f"Placing initial long entry")
-                            self.limit_order(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
+                            self.limit_order_bybit(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
                             print(f"Placed initial long entry")
                         else:
                             if trend.lower() == "long" and should_add_to_long and long_pos_qty < max_trade_qty and best_bid_price < long_pos_price:
                                 print(f"Placed additional long entry")
-                                self.limit_order(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
+                                self.limit_order_bybit(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
 
             open_orders = self.exchange.get_open_orders(symbol)
 

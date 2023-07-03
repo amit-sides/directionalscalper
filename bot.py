@@ -1,4 +1,5 @@
 import sys
+import traceback
 from pathlib import Path
 
 project_dir = str(Path(__file__).resolve().parent)
@@ -23,18 +24,19 @@ from directionalscalper.core.strategies.bitget.bitget_grid_dynamic import Bitget
 from directionalscalper.core.strategies.bitget.bitget_fivemin import BitgetFiveMinuteStrategy
 from directionalscalper.core.strategies.okx.okx_hedge import OKXHedgeStrategy
 from directionalscalper.core.strategies.bybit.bybit_hedge import BybitHedgeStrategy
-from directionalscalper.core.strategies.bybit.bybit_hedge_volatility import BybitVolatilityHedgeStrategy
 from directionalscalper.core.strategies.bybit.bybit_violent import BybitViolentHedgeStrategy
-from directionalscalper.core.strategies.bybit.bybit_dynamic import BybitDynamicHedgeStrategy
 from directionalscalper.core.strategies.bybit.bybit_hedge_unified import BybitHedgeUnifiedStrategy
 from directionalscalper.core.strategies.bybit.bybit_hedge_grid import BybitHedgeGridStrategy
 from directionalscalper.core.strategies.bybit.bybit_longonly import BybitLongStrategy
 from directionalscalper.core.strategies.bybit.bybit_shortonly import BybitShortStrategy
+from directionalscalper.core.strategies.bybit.bybit_longonly_dynamic_leverage import BybitLongOnlyDynamicLeverage
+from directionalscalper.core.strategies.bybit.bybit_shortonly_dynamic_leverage import BybitShortOnlyDynamicLeverage
 from directionalscalper.core.strategies.bybit.bybit_longonly_dynamic import BybitLongOnlyDynamic
 from directionalscalper.core.strategies.bybit.bybit_shortonly_dynamic import BybitShortOnlyDynamic
-from directionalscalper.core.strategies.bybit.bybit_hedge_dynamictp import BybitHedgeDynamicTP
 from directionalscalper.core.strategies.bybit.bybit_hedge_dynamic_entryexit import BybitHedgeEntryExitDynamic
-from directionalscalper.core.strategies.bybit.bybit_hedge_dynamic_table import BybitHedgeDynamicTable
+from directionalscalper.core.strategies.bybit.bybit_hedge_dynamic_leverage import BybitHedgeDynamicStrategy
+from directionalscalper.core.strategies.bybit.bybit_hedge_dynamic_table import BybitHedgeDynamicLeverageTable
+from directionalscalper.core.strategies.bybit.bybit_auto_hedge import BybitAutoHedgeStrategy
 from directionalscalper.core.strategies.huobi.huobi_hedge import HuobiHedgeStrategy
 from directionalscalper.core.strategies.binance.binance_hedge import BinanceHedgeStrategy
 from directionalscalper.core.strategies.phemex.phemex_hedge import PhemexHedgeStrategy
@@ -173,13 +175,13 @@ if __name__ == '__main__':
             strategy = BybitShortOnlyDynamic(market_maker.exchange, market_maker.manager, config.bot)
             strategy.run(symbol)
 
-        elif strategy_name.lower() == 'bybit_hedge_dynamictp':
-            strategy = BybitHedgeDynamicTP(market_maker.exchange, market_maker.manager, config.bot)
-            strategy.run(symbol, amount)
+        elif strategy_name.lower() == 'bybit_longonly_dynamic_leverage':
+            strategy = BybitLongOnlyDynamicLeverage(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
 
-        elif strategy_name.lower() == 'bybit_hedge_volatility':
-            strategy = BybitVolatilityHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
-            strategy.run(symbol, amount)
+        elif strategy_name.lower() == 'bybit_shortonly_dynamic_leverage':
+            strategy = BybitShortOnlyDynamicLeverage(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
 
         elif strategy_name.lower() == 'bybit_hedge_unified':
             strategy = BybitHedgeUnifiedStrategy(market_maker.exchange, market_maker.manager, config.bot)
@@ -188,38 +190,22 @@ if __name__ == '__main__':
         elif strategy_name.lower() == 'bybit_hedge_violent':
             strategy = BybitViolentHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
             strategy.run(symbol, amount)
-        
-        elif strategy_name.lower() == 'bybit_hedge_dynamic':
-            strategy = BybitDynamicHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
-            strategy.run(symbol)
 
-        elif strategy_name.lower() == 'bybit_hedge_dynamic_full':
+        elif strategy_name.lower() == 'bybit_hedge_dynamic_safemode':
             strategy = BybitHedgeEntryExitDynamic(market_maker.exchange, market_maker.manager, config.bot)
             strategy.run(symbol)
 
-        elif strategy_name.lower() == 'bybit_hedge_dynamic_table':
-            strategy = BybitHedgeDynamicTable(market_maker.exchange, market_maker.manager, config.bot)
+        elif strategy_name.lower() == 'bybit_hedge_dynamic':
+            strategy = BybitHedgeDynamicStrategy(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
 
-            while True:  # keep the bot running
-                try:
-                    # If strategy has a table, refresh it and run strategy
-                    if hasattr(strategy, 'table'):  
-                        live = Live(strategy.table.table, refresh_per_second=4)
-                        live.start()  # start live update
-                        
-                        try:
-                            strategy.run(symbol)
-                        except IndexError as e:  # error in strategy
-                            print("Error while running strategy: ", str(e))
+        elif strategy_name.lower() == 'bybit_hedge_dynamic_table_old':
+            strategy = BybitHedgeDynamicLeverageTable(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
 
-                        live.stop()  # stop live update after strategy run
-
-                    # If strategy doesn't have a table, just run it
-                    else:  
-                        strategy.run(symbol)
-
-                except IndexError as e:  # error during live update
-                    print("Error while refreshing live table from bot.py: ", str(e))
+        elif strategy_name.lower() == 'bybit_auto_hedge':
+            strategy = BybitAutoHedgeStrategy(market_maker.exchange, market_maker.manager, config.bot)
+            strategy.run(symbol)
 
         elif strategy_name.lower() == 'bybit_hedge_grid':
             strategy = BybitHedgeGridStrategy(market_maker.exchange, market_maker.manager, config.bot)

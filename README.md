@@ -13,17 +13,11 @@ A hedge scalping strategy based on directional analysis using a quantitative app
 >  Exchanges that are WIP: Binance, MEXC, Phemex
  
 >  Minor bugs: 
- 
->> Bybit: Dynamic size calculation may round quantities when unnecessary.
- 
+
 >> Huobi: Possible leverage issue per symbol
- 
->> Bitget: 
- 
  
 ### Links
 * Dashboard: https://tradesimple.xyz
-* API: http://api.tradesimple.xyz/data/quantdata.json
 * APIv2: http://api.tradesimple.xyz/data/quantdatav2.json
 
 Directional Scalper        |  API Scraper
@@ -33,18 +27,19 @@ Directional Scalper        |  API Scraper
 ## Quickstart
 - Clone the repo `git clone https://github.com/donewiththedollar/directionalscalper.git`
 - Install requirements `pip3.11 install -r requirements.txt`
+- Add API key(s) to config.json in /configs folder
+- Run the bot `python3.11 bot.py --exchange bybit --symbol DOGEUSDT --strategy bybit_auto_hedge --config config.json`
  
-### Install Instructions
-Steps to set up bot-multiexchange
+### Full installation instructions
+Steps to set up Directionalscalper v2
 
 - `sudo apt-get update`
 - `sudo apt-get upgrade -y`
-- `git clone https://github.com/donewiththedollar/directionalscalper.git —branch bot-multiexchange`
+- `git clone https://github.com/donewiththedollar/directionalscalper.git`
 
-Now you have the bot, but need to set up python correctly.
+Now you have the bot but you must install Python 3.11
 
-
-Now install Python 3.11
+Here is how you can install Python 3.11 from source: 
 
 All of these commands one by one copy and pasted into terminal: 
 `wget https://www.python.org/ftp/python/3.11.0/Python-3.11.0.tgz`
@@ -89,7 +84,7 @@ Make sure you are in the directory bot-multiexchange
 ### Setting up the bot
  1. Create `config.json` from `config.example.json` in /configs directory
  2. Enter exchange_api_key and exchange_api_secret
- 3. Check/fill all other options. For telegram see below
+ 3. Check/fill all other options. For telegram/discord see below
 
  ### Setting up Telegram alerts
  1. Get token from botfather after creating new bot, send a message to your new bot
@@ -114,8 +109,13 @@ Make sure you are in the directory bot-multiexchange
 # Current strategies
 ## Bybit
 * bybit_hedge
+* bybit_auto_hedge - Dynamic entry, take profit distance, position leverage per side. Table included.
 * bybit_longonly
 * bybit_shortonly
+* bybit_longonly_dynamic
+* bybit_shortonly_dynamic
+* bybit_longonly_dynamic_leverage
+* bybit_shortonly_dynamic_leverage
  
 ## Bitget 
 * bitget_hedge
@@ -140,7 +140,7 @@ Make sure you are in the directory bot-multiexchange
 
 ### Docker
 To run the bot inside docker container use the following command:
-> docker-compose run directional-scalper python3 bot.py --mode hedge --symbol GALAUSDT --iqty 1
+> docker-compose run directional-scalper python3.11 bot.py --symbol SUIUSDT --strategy bybit_hedge_dynamic_unstuck --config config_main.json
 
 ### Proxy
 If you need to use a proxy to access the Exchange API, you can set the environment variables as shown in the following example:
@@ -156,12 +156,11 @@ $ export HTTPS_PROXY="http://10.10.1.10:1080"
 
 
 ### To do:
+* Pretty table
 * Instance manager
-* Auto calculation for violent parameters (violent_multiplier and wallet_exposure are key)
-* Auto calculation for lot size so the user does not have to determine size
-* Take over all exchanges
+* Binance, Phemex, MEXC base. (MEXC Futs API down until Q4)
 
 
 ### Donations
-If you would like to show your appreciation for this project through donations, there are a few addresses here to choose from
+Funds acquired through contributions will be judiciously allocated towards the maintenance and enhancement of our API server infrastructure. This financial support is instrumental in ensuring seamless operations, while also facilitating continuous improvements to our broader network infrastructure.
 * **BTC**: bc1q9hyvvtcsm0k39svz59hjgz4f6dr6c2k4wlrxmc
