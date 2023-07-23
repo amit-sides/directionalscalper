@@ -50,7 +50,7 @@ All of these commands one by one copy and pasted into terminal: 
 - `sudo apt-get update`
 - `sudo apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libsqlite3-dev libreadline-dev libffi-dev libbz2-dev`
 
-- `/configure --enable-optimizations`
+- `./configure --enable-optimizations`
 - `make`
 - `sudo make altinstall`
 
@@ -69,17 +69,18 @@ This pip3.11 -V should show you have pip3.11 installed, no error.
 
 Starting the bot for the first time making sure it works
 
-Make sure you are in the directory bot-multiexchange
+Make sure you are in the directory directionalscalper
 
-- `so cd ~/bot-multiexchange should bring you there if you are not already there.`
+- `so cd ~/directionalscalper should bring you there if you are not already there.`
 
 > Run these:
 
 - `pip3.11 install -r requirements.txt`
 
 > Modify your config_example.json file with your bitget API keys and then run this:
+- `python3.11 bot.py --exchange bybit --symbol SUIUSDT --strategy bybit_hedge_mfirsi_maker --config config_bybit_sub1.json`
+> or a different exchange:
 - `python3.11 bot.py --exchange bitget --symbol OPUSDT_UMCBL --strategy bitget_hedge_dynamic --config config_example.json`
-
  
 ### Setting up the bot
  1. Create `config.json` from `config.example.json` in /configs directory
@@ -92,12 +93,12 @@ Make sure you are in the directory bot-multiexchange
  3. Replacing <bot_token> with your token from the botfather after creating new bot
  4. Look for chat id and copy the chat id into config.json
  
-### Starting the bot
+### Starting the bot examples
 * Hedge strategy is recommended, but you can of course use the other strategies as well. Low entry size is recommended.
 
-> python3.11 bot.py --exchange bitget --symbol XRPUSDT_UMCBL --amount 15 --strategy bitget_hedge --config config_main.json
+> python3.11 bot.py --exchange bybit --symbol SUIUSDT --strategy bybit_hedge_mfirsi_maker --config config_bybit_sub1.json
 
-> python3.11 bot.py --exchange bybit --symbol XRPUSDT --amount 1 --strategy bybit_hedge --config config_sub1.json
+> python3.11 bot.py --exchange bitget --symbol XRPUSDT_UMCBL --amount 15 --strategy bitget_hedge --config config_main.json
  
 > python3.11 bot.py --exchange huobi --symbol XRPUSDT --amount 1 --strategy huobi_hedge --config config_whatever.json
  
@@ -110,6 +111,8 @@ Make sure you are in the directory bot-multiexchange
 ## Bybit
 * bybit_hedge
 * bybit_auto_hedge - Dynamic entry, take profit distance, position leverage per side. Table included.
+* bybit_hedge_mfirsi_maker - MFI, RSI, ERI, MA for entry. Pure maker, dynamic entry size, dynamic take profit based on 5m spread
+* bybit_hedge_mfirsionly_maker - MFIRSI only as entry. Pure maker, dynamic entry size, dynamic take profit based on 5m spread
 * bybit_longonly
 * bybit_shortonly
 * bybit_longonly_dynamic
@@ -140,7 +143,7 @@ Make sure you are in the directory bot-multiexchange
 
 ### Docker
 To run the bot inside docker container use the following command:
-> docker-compose run directional-scalper python3.11 bot.py --symbol SUIUSDT --strategy bybit_hedge_dynamic_unstuck --config config_main.json
+> docker-compose run directional-scalper python3.11 bot.py --symbol SUIUSDT --strategy bybit_hedge_mfirsi_maker --config config_main.json
 
 ### Proxy
 If you need to use a proxy to access the Exchange API, you can set the environment variables as shown in the following example:
@@ -164,3 +167,4 @@ $ export HTTPS_PROXY="http://10.10.1.10:1080"
 ### Donations
 Funds acquired through contributions will be judiciously allocated towards the maintenance and enhancement of our API server infrastructure. This financial support is instrumental in ensuring seamless operations, while also facilitating continuous improvements to our broader network infrastructure.
 * **BTC**: bc1q9hyvvtcsm0k39svz59hjgz4f6dr6c2k4wlrxmc
+* **USDT (ERC20)**: 0xb40b2842d4ce93e31CFC8DC2629E2Bd426e4b87E

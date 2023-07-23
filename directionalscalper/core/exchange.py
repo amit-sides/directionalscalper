@@ -8,12 +8,9 @@ import requests, hmac, hashlib
 import urllib.parse
 from typing import Optional, Tuple
 from ccxt.base.errors import RateLimitExceeded
+from .strategies.logger import Logger
 
-log = logging.getLogger(__name__)
-
-# logger = logging.getLogger()
-# logger.setLevel(logging.DEBUG)  # Set the logging level to DEBUG
-# logging.basicConfig()  # Enable logging
+logging = Logger(filename="exchange.log", stream=True)
 
 class Exchange:
     def __init__(self, exchange_id, api_key, secret_key, passphrase=None):
@@ -37,15 +34,22 @@ class Exchange:
                 'http': os.environ.get('HTTP_PROXY'),
                 'https': os.environ.get('HTTPS_PROXY'),
             }
-        if self.exchange_id.lower() == 'huobi':
+            
+        if self.passphrase:
+            exchange_params["password"] = self.passphrase
+
+        exchange_id_lower = self.exchange_id.lower()
+
+        if exchange_id_lower == 'huobi':
             exchange_params['options'] = {
                 'defaultType': 'swap',
                 'defaultSubType': 'linear',
             }
-        if self.passphrase:
-            exchange_params["password"] = self.passphrase
-
-        elif self.exchange_id.lower() == 'binance':
+        elif exchange_id_lower == 'bybit_spot':
+            exchange_params['options'] = {
+                'defaultType': 'spot',
+            }
+        elif exchange_id_lower == 'binance':
             exchange_params['options'] = {
                 'defaultType': 'future',
             }
@@ -68,15 +72,15 @@ class Exchange:
                 symbols = [market['symbol'] for market in markets.values()]
                 return symbols
             except ccxt.errors.RateLimitExceeded as e:
-                log.warning(f"Rate limit exceeded: {e}, retrying in 10 seconds...")
+                logging.info(f"Rate limit exceeded: {e}, retrying in 10 seconds...")
                 time.sleep(10)
             except Exception as e:
-                log.warning(f"An error occurred while fetching symbols: {e}, retrying in 10 seconds...")
+                logging.info(f"An error occurred while fetching symbols: {e}, retrying in 10 seconds...")
                 time.sleep(10)
 
     def check_account_type_huobi(self):
         if self.exchange_id.lower() != 'huobi':
-            print("This operation is only available for Huobi.")
+            logging.info("This operation is only available for Huobi.")
             return
 
         response = self.exchange.contractPrivateGetLinearSwapApiV3SwapUnifiedAccountType()
@@ -84,7 +88,7 @@ class Exchange:
     
     def switch_account_type_huobi(self, account_type: int):
         if self.exchange_id.lower() != 'huobi':
-            print("This operation is only available for Huobi.")
+            logging.info("This operation is only available for Huobi.")
             return
 
         body = {
@@ -140,7 +144,7 @@ class Exchange:
         markets = self.exchange.fetch_markets()
         
         # Print the first market from the list
-        print(markets[0])
+        logging.info(markets[0])
 
         # Filter for the specific symbol
         for market in markets:
@@ -167,7 +171,7 @@ class Exchange:
     # Bybit calc lot size based on spread
     def spread_based_entry_size_bybit(self, symbol, spread, min_order_qty):
         current_price = self.get_current_price(symbol)
-        print(f"Current price debug: {current_price}")
+        logging.info(f"Current price debug: {current_price}")
         entry_amount = min_order_qty + (spread * current_price) / 100
 
         return entry_amount
@@ -175,16 +179,16 @@ class Exchange:
     def debug_derivatives_positions(self, symbol):
         try:
             positions = self.exchange.fetch_derivatives_positions([symbol])
-            print(f"Debug positions: {positions}")
+            logging.info(f"Debug positions: {positions}")
         except Exception as e:
-            print(f"Exception in debug derivs func: {e}")
+            logging.info(f"Exception in debug derivs func: {e}")
 
     def debug_derivatives_markets_bybit(self):
         try:
             markets = self.exchange.fetch_derivatives_markets({'category': 'linear'})
-            print(f"Debug markets: {markets}")
+            logging.info(f"Debug markets: {markets}")
         except Exception as e:
-            print(f"Exception in debug_derivatives_markets_bybit: {e}")
+            logging.info(f"Exception in debug_derivatives_markets_bybit: {e}")
 
     # Bybit
     def bybit_fetch_precision(self, symbol):
@@ -196,7 +200,7 @@ class Exchange:
                     self.market_precisions[symbol] = {'amount': float(qty_step)}
                     break
         except Exception as e:
-            print(f"Exception in bybit_fetch_precision: {e}")
+            logging.info(f"Exception in bybit_fetch_precision: {e}")
 
 
     # # Bybit
@@ -227,19 +231,19 @@ class Exchange:
             if len(positions) > 0:
                 position = positions[0]
                 leverage = position['leverage']
-                print(f"Current leverage for symbol {symbol}: {leverage}")
+                logging.info(f"Current leverage for symbol {symbol}: {leverage}")
             else:
-                print(f"No positions found for symbol {symbol}")
+                logging.info(f"No positions found for symbol {symbol}")
         except Exception as e:
-            print(f"Error retrieving current leverage: {e}")
+            logging.info(f"Error retrieving current leverage: {e}")
             
     # Bybit
     def set_leverage_bybit(self, leverage, symbol):
         try:
             self.exchange.set_leverage(leverage, symbol)
-            print(f"Leverage set to {leverage} for symbol {symbol}")
+            logging.info(f"Leverage set to {leverage} for symbol {symbol}")
         except Exception as e:
-            print(f"Error setting leverage: {e}")
+            logging.info(f"Error setting leverage: {e}")
 
     # Bybit
     def setup_exchange_bybit(self, symbol) -> None:
@@ -249,7 +253,7 @@ class Exchange:
             self.exchange.set_position_mode(hedged=True, symbol=symbol)
             values["position"] = True
         except Exception as e:
-            log.warning(f"An unknown error occurred in with set_position_mode: {e}")
+            logging.info(f"An unknown error occurred in with set_position_mode: {e}")
 
         market_data = self.get_market_data_bybit(symbol=symbol)
         try:
@@ -257,24 +261,9 @@ class Exchange:
             self.exchange.set_derivatives_margin_mode(marginMode="cross", symbol=symbol)
 
         except Exception as e:
-            log.warning(f"An unknown error occurred in with set_derivatives_margin_mode: {e}")
+            logging.info(f"An unknown error occurred in with set_derivatives_margin_mode: {e}")
 
-        log.info(values)
-
-    # Bybit
-    def get_trading_fee_bybit(self, symbol: str):
-        market = self.market(symbol)
-        if market['spot']:
-            raise Exception("Fetching trading fee is not supported for spot market.")
-
-        request = {
-            'symbol': market['id'],
-        }
-        response = self.privateGetV5AccountFeeRate(self.extend(request, params))
-        result = self.safe_value(response, 'result', {})
-        fees = self.safe_value(result, 'list', [])
-        first = self.safe_value(fees, 0, {})
-        return self.parse_trading_fee(first)
+        # log.info(values)
 
     def parse_trading_fee(self, fee_data):
         maker_fee = float(fee_data.get('makerFeeRate', '0'))
@@ -300,7 +289,7 @@ class Exchange:
             values["leverage"] = None
 
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_market_data_mexc(): {e}")
+            logging.info(f"An unknown error occurred in get_market_data_mexc(): {e}")
         return values
 
     # Bitget
@@ -371,10 +360,10 @@ class Exchange:
                 if "limits" in symbol_data:
                     values["min_qty"] = symbol_data["limits"]["amount"]["min"]
             else:
-                log.warning("Exchange not recognized for fetching market data.")
+                logging.info("Exchange not recognized for fetching market data.")
 
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_market_data(): {e}")
+            logging.info(f"An unknown error occurred in get_market_data(): {e}")
         return values
 
     # Bybit
@@ -398,9 +387,42 @@ class Exchange:
                     values["leverage"] = float(position['leverage'])
 
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_market_data_bybit(): {e}")
+            logging.info(f"An unknown error occurred in get_market_data_bybit(): {e}")
         return values
 
+    # Huobi
+    # def fetch_max_leverage_huobi(self, symbol):
+    #     """
+    #     Retrieve the maximum leverage for a given symbol
+    #     :param str symbol: unified market symbol
+    #     :returns int: maximum leverage for the symbol
+    #     """
+    #     leverage_tiers = self.exchange.fetch_leverage_tiers([symbol])
+    #     if symbol in leverage_tiers:
+    #         symbol_tiers = leverage_tiers[symbol]
+    #         print(symbol_tiers)  # print the content of symbol_tiers
+    #         max_leverage = max([tier['lever_rate'] for tier in symbol_tiers])
+    #         return max_leverage
+    #     else:
+    #         return None
+
+    def fetch_max_leverage_huobi(self, symbol):
+        """
+        Retrieve the maximum leverage for a given symbol
+        :param str symbol: unified market symbol
+        :returns int: maximum leverage for the symbol
+        """
+        leverage_tiers = self.exchange.fetch_leverage_tiers([symbol])
+        if symbol in leverage_tiers:
+            symbol_tiers = leverage_tiers[symbol]
+            #print(symbol_tiers)  # print the content of symbol_tiers
+            #max_leverage = max([tier['lever_rate'] for tier in symbol_tiers])
+            max_leverage = max([tier['maxLeverage'] for tier in symbol_tiers])
+            return max_leverage
+        else:
+            return None
+
+        
     # Huobi
     def get_market_data_huobi(self, symbol: str) -> dict:
         values = {"precision": 0.0, "min_qty": 0.0, "leverage": 0.0}
@@ -415,7 +437,7 @@ class Exchange:
             if "info" in symbol_data and "leverage-ratio" in symbol_data["info"]:
                 values["leverage"] = float(symbol_data["info"]["leverage-ratio"])
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_market_data_huobi(): {e}")
+            logging.info(f"An unknown error occurred in get_market_data_huobi(): {e}")
         return values
 
     # Bybit
@@ -460,6 +482,28 @@ class Exchange:
                 print(f"KeyError: {e}")
                 print(balance)  # Print the balance if there was a KeyError
         return None
+
+    def get_available_balance_huobi(self, symbol):
+        try:
+            balance_data = self.exchange.fetch_balance()
+            contract_details = balance_data.get('info', {}).get('data', [{}])[0].get('futures_contract_detail', [])
+            for contract in contract_details:
+                if contract['contract_code'] == symbol:
+                    return float(contract['margin_available'])
+            return "No contract found for symbol " + symbol
+        except Exception as e:
+            return f"An error occurred while fetching balance: {str(e)}"
+
+
+    def debug_print_balance_huobi(self):
+        try:
+            balance = self.exchange.fetch_balance()
+            print("Full balance data:")
+            print(balance)
+        except Exception as e:
+            print(f"An error occurred while fetching balance: {str(e)}")
+
+
 
     # Binance
     def get_balance_binance(self, symbol: str):
@@ -670,10 +714,34 @@ class Exchange:
                             float(data["info"]["result"][quote]["equity"]), 2
                         )
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_balance(): {e}")
+            logging.info(f"An unknown error occurred in get_balance(): {e}")
         return values
     
     # Universal
+    def fetch_ohlcv(self, symbol, timeframe='1d'):
+        """
+        Fetch OHLCV data for the given symbol and timeframe.
+
+        :param symbol: Trading symbol.
+        :param timeframe: Timeframe string.
+        :return: DataFrame with OHLCV data.
+        """
+        try:
+            # Fetch the OHLCV data from the exchange
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe)
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+            df.set_index('timestamp', inplace=True)
+
+            return df
+
+        except ccxt.BaseError as e:
+            print(f'Failed to fetch OHLCV data: {e}')
+            return pd.DataFrame()
+        
     def get_orderbook(self, symbol, max_retries=3, retry_delay=5) -> dict:
         values = {"bids": [], "asks": []}
         
@@ -688,10 +756,10 @@ class Exchange:
                 break  # if the fetch was successful, break out of the loop
             except Exception as e:
                 if i < max_retries - 1:  # if not the last attempt
-                    log.warning(f"An unknown error occurred in get_orderbook(): {e}. Retrying in {retry_delay} seconds...")
+                    logging.info(f"An unknown error occurred in get_orderbook(): {e}. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 else:
-                    log.error(f"Failed to fetch order book after {max_retries} attempts: {e}")
+                    logging.info(f"Failed to fetch order book after {max_retries} attempts: {e}")
                     raise e  # If it's still failing after max_retries, re-raise the exception.
         
         return values
@@ -748,7 +816,7 @@ class Exchange:
                     values[side]["liq_price"] = None
                 values[side]["entry_price"] = float(position["entryPrice"])
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_positions_bitget(): {e}")
+            logging.info(f"An unknown error occurred in get_positions_bitget(): {e}")
         return values
 
     # Bybit
@@ -808,73 +876,20 @@ class Exchange:
                 break  # If the fetch was successful, break out of the loop
             except Exception as e:
                 if i < max_retries - 1:  # If not the last attempt
-                    log.warning(f"An unknown error occurred in get_positions_bybit(): {e}. Retrying in {retry_delay} seconds...")
+                    logging.info(f"An unknown error occurred in get_positions_bybit(): {e}. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 else:
-                    log.error(f"Failed to fetch positions after {max_retries} attempts: {e}")
+                    logging.info(f"Failed to fetch positions after {max_retries} attempts: {e}")
                     raise e  # If it's still failing after max_retries, re-raise the exception.
 
         return values
-
-    # def get_positions_bybit(self, symbol) -> dict:
-    #     values = {
-    #         "long": {
-    #             "qty": 0.0,
-    #             "price": 0.0,
-    #             "realised": 0,
-    #             "cum_realised": 0,
-    #             "upnl": 0,
-    #             "upnl_pct": 0,
-    #             "liq_price": 0,
-    #             "entry_price": 0,
-    #         },
-    #         "short": {
-    #             "qty": 0.0,
-    #             "price": 0.0,
-    #             "realised": 0,
-    #             "cum_realised": 0,
-    #             "upnl": 0,
-    #             "upnl_pct": 0,
-    #             "liq_price": 0,
-    #             "entry_price": 0,
-    #         },
-    #     }
-    #     try:
-    #         data = self.exchange.fetch_positions(symbol)
-    #         #print(data)  # Print debug info
-    #         if len(data) == 2:
-    #             sides = ["long", "short"]
-    #             for side in [0, 1]:
-    #                 values[sides[side]]["qty"] = float(data[side]["contracts"])
-    #                 values[sides[side]]["price"] = float(data[side]["entryPrice"] or 0)
-    #                 values[sides[side]]["realised"] = round(
-    #                     float(data[side]["info"]["unrealisedPnl"] or 0), 4
-    #                 )
-    #                 values[sides[side]]["cum_realised"] = round(
-    #                     float(data[side]["info"]["cumRealisedPnl"] or 0), 4
-    #                 )
-    #                 values[sides[side]]["upnl"] = round(
-    #                     float(data[side]["info"]["unrealisedPnl"] or 0), 4
-    #                 )
-    #                 values[sides[side]]["upnl_pct"] = round(
-    #                     float(data[side]["percentage"] or 0), 4  # Change 'precentage' to 'percentage'
-    #                 )
-    #                 values[sides[side]]["liq_price"] = float(
-    #                     data[side]["liquidationPrice"] or 0
-    #                 )
-    #                 values[sides[side]]["entry_price"] = float(
-    #                     data[side]["entryPrice"] or 0
-    #                 )
-    #     except Exception as e:
-    #         log.warning(f"An unknown error occurred in get_positions(): {e}")
-    #     return values
 
     def print_positions_structure_binance(self):
         try:
             data = self.exchange.fetch_positions_risk()
             print(data)
         except Exception as e:
-            log.warning(f"An unknown error occurred: {e}")
+            logging.info(f"An unknown error occurred: {e}")
 
     # Binance
     def get_positions_binance(self, symbol):
@@ -942,7 +957,7 @@ class Exchange:
                         values[position_side]["liq_price"] = float(position["info"]["liquidationPrice"] or 0)
                         values[position_side]["entry_price"] = entry_price
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_positions_binance(): {e}")
+            logging.info(f"An unknown error occurred in get_positions_binance(): {e}")
         return values
 
 
@@ -1089,7 +1104,7 @@ class Exchange:
                 values[side]["liq_price"] = 0.0  # Huobi API doesn't seem to provide liquidation price
                 values[side]["entry_price"] = float(position["info"]["cost_open"])
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_positions_huobi(): {e}")
+            logging.info(f"An unknown error occurred in get_positions_huobi(): {e}")
         return values
 
     # Huobi debug
@@ -1153,7 +1168,7 @@ class Exchange:
                             data[side]["entryPrice"]
                         )
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_positions(): {e}")
+            logging.info(f"An unknown error occurred in get_positions(): {e}")
         return values
 
     # Universal
@@ -1164,7 +1179,7 @@ class Exchange:
             if "bid" in ticker and "ask" in ticker:
                 current_price = (ticker["bid"] + ticker["ask"]) / 2
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_positions(): {e}")
+            logging.info(f"An unknown error occurred in get_positions(): {e}")
         return current_price
 
     def get_moving_averages(self, symbol: str, timeframe: str = "1m", num_bars: int = 20, max_retries=3, retry_delay=5) -> dict:
@@ -1190,10 +1205,10 @@ class Exchange:
                 break  # If the fetch was successful, break out of the loop
             except Exception as e:
                 if i < max_retries - 1:  # If not the last attempt
-                    log.warning(f"An unknown error occurred in get_moving_averages(): {e}. Retrying in {retry_delay} seconds...")
+                    logging.info(f"An unknown error occurred in get_moving_averages(): {e}. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 else:
-                    log.error(f"Failed to fetch moving averages after {max_retries} attempts: {e}")
+                    logging.info(f"Failed to fetch moving averages after {max_retries} attempts: {e}")
                     raise e  # If it's still failing after max_retries, re-raise the exception.
         
         return values
@@ -1242,7 +1257,7 @@ class Exchange:
                         }
                         open_orders_list.append(order_info)
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_open_orders(): {e}")
+            logging.info(f"An unknown error occurred in get_open_orders(): {e}")
         return open_orders_list
 
     # Binance
@@ -1264,7 +1279,7 @@ class Exchange:
                         }
                         open_orders_list.append(order_info)
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_open_orders(): {e}")
+            logging.info(f"An unknown error occurred in get_open_orders(): {e}")
         return open_orders_list
 
 
@@ -1287,7 +1302,7 @@ class Exchange:
                         }
                         open_orders_list.append(order_info)
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_open_orders(): {e}")
+            logging.info(f"An unknown error occurred in get_open_orders(): {e}")
         return open_orders_list
 
 
@@ -1309,7 +1324,7 @@ class Exchange:
                         }
                         open_orders.append(order_data)
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_open_orders_debug(): {e}")
+            logging.info(f"An unknown error occurred in get_open_orders_debug(): {e}")
         return open_orders
 
     def get_open_orders_huobi(self, symbol: str) -> list:
@@ -1331,17 +1346,17 @@ class Exchange:
                             }
                             open_orders_list.append(order_info)
                         except KeyError as e:
-                            log.warning(f"Key {e} not found in order info.")
+                            logging.info(f"Key {e} not found in order info.")
         except Exception as e:
-            log.warning(f"An unknown error occurred in get_open_orders_huobi(): {e}")
+            logging.info(f"An unknown error occurred in get_open_orders_huobi(): {e}")
         return open_orders_list
 
     def debug_open_orders(self, symbol: str) -> None:
         try:
             open_orders = self.exchange.fetch_open_orders(symbol)
-            print(open_orders)
+            logging.info(open_orders)
         except:
-            print(f"Fuck")
+            logging.info(f"Fuck")
 
     def cancel_long_entry(self, symbol: str) -> None:
         self._cancel_entry(symbol, order_side="Buy")
@@ -1365,9 +1380,9 @@ class Exchange:
                         and not reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        log.info(f"Cancelling {order_side} order: {order_id}")
+                        logging.info(f"Cancelling {order_side} order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in _cancel_entry(): {e}")
+            logging.info(f"An unknown error occurred in _cancel_entry(): {e}")
 
     # Binance
     def cancel_all_entries_binance(self, symbol: str) -> None:
@@ -1400,10 +1415,10 @@ class Exchange:
 
                     if order_status != "closed" and not reduce_only:
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        print(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
                         # log.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_all_entries_binance(): {e}")
+            logging.info(f"An unknown error occurred in cancel_all_entries_binance(): {e}")
 
     def cancel_all_entries_bybit(self, symbol: str) -> None:
         try:
@@ -1441,10 +1456,9 @@ class Exchange:
                         and not reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        print(f"Cancelling order: {order_id}")
-                        # log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_all_entries_bybit(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_all_entries_bybit(): {e}")
 
     def cancel_all_entries_huobi(self, symbol: str) -> None:
         try:
@@ -1476,9 +1490,9 @@ class Exchange:
 
                     if order_status != "4" and order_status != "6":
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        print(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_entry(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_entry(): {e}")
 
 
     # Binance
@@ -1523,7 +1537,7 @@ class Exchange:
             return max_leverage
 
         except Exception as e:
-            print(f"An error occurred while fetching max leverage: {e}")
+            logging.info(f"An error occurred while fetching max leverage: {e}")
             return None
 
     # Bitget
@@ -1561,10 +1575,9 @@ class Exchange:
                         and not reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        print(f"Cancelling order: {order_id}")
-                        # log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_entry(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_entry(): {e}")
 
     def get_open_take_profit_order_quantity_bitget(self, orders, side):
         for order in orders:
@@ -1600,9 +1613,9 @@ class Exchange:
                     and not reduce_only
                 ):
                     self.exchange.cancel_order(symbol=symbol, id=order_id)
-                    log.info(f"Cancelling order: {order_id}")
+                    logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_entry(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_entry(): {e}")
 
 
     def cancel_entry(self, symbol: str) -> None:
@@ -1622,7 +1635,7 @@ class Exchange:
                         and not reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
                     elif (
                         order_status != "Filled"
                         and order_side == "Sell"
@@ -1630,9 +1643,9 @@ class Exchange:
                         and not reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_entry(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_entry(): {e}")
 
     # Bybit
     def cancel_take_profit_orders_bybit(self, symbol, side):
@@ -1653,17 +1666,17 @@ class Exchange:
                 ):
                     order_id = order['info']['orderId']
                     self.exchange.cancel_derivatives_order(order_id, symbol)
-                    print(f"Canceled take profit order - ID: {order_id}")
+                    logging.info(f"Canceled take profit order - ID: {order_id}")
         except Exception as e:
             print(f"An unknown error occurred in cancel_take_profit_orders: {e}")
 
     # Bybit
-    def cancel_take_profit_order_by_id(self, order_id, symbol):
+    def cancel_order_by_id(self, order_id, symbol):
         try:
             self.exchange.cancel_derivatives_order(order_id, symbol)
-            print(f"Canceled take profit order - ID: {order_id}")
+            logging.info(f"Canceled take profit order - ID: {order_id}")
         except Exception as e:
-            print(f"An unknown error occurred in cancel_take_profit_orders: {e}")
+            logging.info(f"An unknown error occurred in cancel_take_profit_orders: {e}")
 
     # def cancel_take_profit_orders_bybit(self, symbol, side):
     #     try:
@@ -1708,9 +1721,9 @@ class Exchange:
                         ):
                             # use the new cancel_derivatives_order function
                             self.exchange.cancel_derivatives_order(order_id, symbol)
-                            log.info(f"Cancelling order: {order_id}")
+                            logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_close_bybit(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_close_bybit(): {e}")
 
     def huobi_test_orders(self, symbol: str) -> None:
         try:
@@ -1738,9 +1751,9 @@ class Exchange:
                             and reduce_only
                         ):
                             self.exchange.cancel_order(symbol=symbol, id=order_id)
-                            log.info(f"Cancelling order: {order_id}")
+                            logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_close_bitget(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_close_bitget(): {e}")
 
     def cancel_close_huobi(self, symbol: str, side: str, offset: str) -> None:
         side_map = {"long": "buy", "short": "sell"}
@@ -1763,9 +1776,9 @@ class Exchange:
                         and reduce_only == '1'  # Assuming '1' represents reduce_only orders
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in cancel_close_huobi(): {e}")
+            logging.warning(f"An unknown error occurred in cancel_close_huobi(): {e}")
 
     # def cancel_close_huobi(self, symbol: str, side: str) -> None:
     #     side_map = {"long": "buy", "short": "sell"}
@@ -1834,7 +1847,7 @@ class Exchange:
                         and reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
                     elif (
                         order_status != "Filled"
                         and order_side == "Sell"
@@ -1843,9 +1856,9 @@ class Exchange:
                         and reduce_only
                     ):
                         self.exchange.cancel_order(symbol=symbol, id=order_id)
-                        log.info(f"Cancelling order: {order_id}")
+                        logging.info(f"Cancelling order: {order_id}")
         except Exception as e:
-            log.warning(f"{e}")
+            logging.warning(f"{e}")
 
     # Bybit
     def create_take_profit_order_bybit(self, symbol, order_type, side, amount, price=None, positionIdx=1, reduce_only=True):
@@ -1857,6 +1870,20 @@ class Exchange:
                 raise ValueError(f"Invalid side: {side}")
 
             params = {"reduceOnly": reduce_only}
+            return self.create_limit_order_bybit(symbol, side, amount, price, positionIdx=positionIdx, params=params)
+        else:
+            raise ValueError(f"Unsupported order type: {order_type}")
+
+    # Bybit
+    def postonly_create_take_profit_order_bybit(self, symbol, order_type, side, amount, price=None, positionIdx=1, reduce_only=True, post_only=True):
+        if order_type == 'limit':
+            if price is None:
+                raise ValueError("A price must be specified for a limit order")
+
+            if side not in ["buy", "sell"]:
+                raise ValueError(f"Invalid side: {side}")
+
+            params = {"reduceOnly": reduce_only, "postOnly": post_only}
             return self.create_limit_order_bybit(symbol, side, amount, price, positionIdx=positionIdx, params=params)
         else:
             raise ValueError(f"Unsupported order type: {order_type}")
@@ -1911,7 +1938,7 @@ class Exchange:
     def create_market_order(self, symbol: str, side: str, amount: float, params={}, close_position: bool = False) -> None:
         try:
             if side not in ["buy", "sell"]:
-                log.warning(f"side {side} does not exist")
+                logging.warning(f"side {side} does not exist")
                 return
 
             order_type = "market"
@@ -1928,7 +1955,7 @@ class Exchange:
             response = self.exchange.create_order(symbol, order_type, side, amount, params=params)
             return response
         except Exception as e:
-            log.warning(f"An unknown error occurred in create_market_order(): {e}")
+            logging.warning(f"An unknown error occurred in create_market_order(): {e}")
 
     def create_limit_order_bybit_unified(self, symbol: str, side: str, qty: float, price: float, positionIdx=0, params={}):
         try:
@@ -1943,9 +1970,9 @@ class Exchange:
                 )
                 return order
             else:
-                log.warning(f"side {side} does not exist")
+                logging.warning(f"side {side} does not exist")
         except Exception as e:
-            log.warning(f"An unknown error occurred in create_limit_order(): {e}")
+            logging.warning(f"An unknown error occurred in create_limit_order(): {e}")
 
     # Bybit
     def create_limit_order_bybit(self, symbol: str, side: str, qty: float, price: float, positionIdx=0, params={}):
@@ -1961,9 +1988,9 @@ class Exchange:
                 )
                 return order
             else:
-                log.warning(f"side {side} does not exist")
+                logging.warning(f"side {side} does not exist")
         except Exception as e:
-            log.warning(f"An unknown error occurred in create_limit_order(): {e}")
+            logging.warning(f"An unknown error occurred in create_limit_order(): {e}")
 
     # # Binance
     # def create_take_profit_order_binance(self, symbol, side, amount, price):
@@ -1996,9 +2023,9 @@ class Exchange:
                 )
                 return order
             else:
-                log.warning(f"Invalid side: {side}")
+                logging.warning(f"Invalid side: {side}")
         except Exception as e:
-            log.warning(f"An unknown error occurred in create_close_position_limit_order_binance(): {e}")
+            logging.warning(f"An unknown error occurred in create_close_position_limit_order_binance(): {e}")
 
     # Binance
     def create_take_profit_order_binance(self, symbol, side, amount, price):
@@ -2028,9 +2055,9 @@ class Exchange:
                 )
                 return order
             else:
-                log.warning(f"side {side} does not exist")
+                logging.warning(f"side {side} does not exist")
         except Exception as e:
-            log.warning(f"An unknown error occurred in create_limit_order_binance(): {e}")
+            logging.warning(f"An unknown error occurred in create_limit_order_binance(): {e}")
 
     def create_limit_order(self, symbol, side, amount, price, reduce_only=False, **params):
         if side == "buy":
@@ -2096,9 +2123,9 @@ class Exchange:
                 order = self.exchange.create_contract_v3_order(symbol, 'market', side, qty, params=request)
                 return order
             else:
-                log.warning(f"Side {side} does not exist")
+                logging.warning(f"Side {side} does not exist")
         except Exception as e:
-            log.warning(f"An unknown error occurred in create_market_order(): {e}")
+            logging.warning(f"An unknown error occurred in create_market_order(): {e}")
 
     def create_contract_order_huobi(self, symbol, order_type, side, amount, price=None, params={}):
         params = {'leverRate': 50}
@@ -2125,23 +2152,3 @@ class Exchange:
     #     markets = self.exchange.load_markets()
     #     symbols = [market['symbol'] for market in markets.values()]
     #     return symbols
-
-    # def setup_exchange(self, symbol) -> None:
-    #     values = {"position": False, "margin": False, "leverage": False}
-    #     try:
-    #         self.exchange.set_position_mode(hedged="BothSide", symbol=symbol)
-    #         values["position"] = True
-    #     except Exception as e:
-    #         log.warning(f"An unknown error occurred in with set_position_mode: {e}")
-    #     try:
-    #         self.exchange.set_margin_mode(marginMode="cross", symbol=symbol)
-    #         values["margin"] = True
-    #     except Exception as e:
-    #         log.warning(f"An unknown error occurred in with set_margin_mode: {e}")
-    #     market_data = self.get_market_data(symbol=symbol)
-    #     try:
-    #         self.exchange.set_leverage(leverage=market_data["leverage"], symbol=symbol)
-    #         values["leverage"] = True
-    #     except Exception as e:
-    #         log.warning(f"An unknown error occurred in with set_leverage: {e}")
-    #     log.info(values)

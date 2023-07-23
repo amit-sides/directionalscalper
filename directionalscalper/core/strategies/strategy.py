@@ -1,6 +1,14 @@
 from colorama import Fore
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_DOWN
 import time
+import math
+import ta as ta
+import os
+import logging
+from .logger import Logger
+from datetime import datetime, timedelta
+
+logging = Logger(filename="strategy.log", stream=True)
 
 class Strategy:
     def __init__(self, exchange, config, manager):
@@ -9,11 +17,22 @@ class Strategy:
         self.manager = manager
         self.symbol = config.symbol
         self.printed_trade_quantities = False
+        self.last_mfirsi_signal = None
+        self.taker_fee_rate = 0.055 / 100
+
+    def get_current_price(self, symbol):
+        return self.exchange.get_current_price(symbol)
 
     def limit_order_bybit_unified(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
         params = {"reduceOnly": reduceOnly}
         #print(f"Symbol: {symbol}, Side: {side}, Amount: {amount}, Price: {price}, Params: {params}")
         order = self.exchange.create_limit_order_bybit_unified(symbol, side, amount, price, positionIdx=positionIdx, params=params)
+        return order
+
+    def postonly_limit_order_bybit(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
+        params = {"reduceOnly": reduceOnly, "postOnly": True}
+        #print(f"Symbol: {symbol}, Side: {side}, Amount: {amount}, Price: {price}, Params: {params}")
+        order = self.exchange.create_limit_order_bybit(symbol, side, amount, price, positionIdx=positionIdx, params=params)
         return order
     
     def limit_order_bybit(self, symbol, side, amount, price, positionIdx, reduceOnly=False):
@@ -43,7 +62,7 @@ class Strategy:
             should_add_to_short = short_pos_price < ma_6_low
             short_tp_distance_percent = ((short_take_profit - short_pos_price) / short_pos_price) * 100
             short_expected_profit_usdt = short_tp_distance_percent / 100 * short_pos_price * short_pos_qty
-            print(f"Short TP price: {short_take_profit}, TP distance in percent: {-short_tp_distance_percent:.2f}%, Expected profit: {-short_expected_profit_usdt:.2f} USDT")
+            logging.info(f"Short TP price: {short_take_profit}, TP distance in percent: {-short_tp_distance_percent:.2f}%, Expected profit: {-short_expected_profit_usdt:.2f} USDT")
             return should_add_to_short, short_tp_distance_percent, short_expected_profit_usdt
         return None, None, None
 
@@ -52,7 +71,7 @@ class Strategy:
             should_add_to_long = long_pos_price > ma_6_low
             long_tp_distance_percent = ((long_take_profit - long_pos_price) / long_pos_price) * 100
             long_expected_profit_usdt = long_tp_distance_percent / 100 * long_pos_price * long_pos_qty
-            print(f"Long TP price: {long_take_profit}, TP distance in percent: {long_tp_distance_percent:.2f}%, Expected profit: {long_expected_profit_usdt:.2f} USDT")
+            logging.info(f"Long TP price: {long_take_profit}, TP distance in percent: {long_tp_distance_percent:.2f}%, Expected profit: {long_expected_profit_usdt:.2f} USDT")
             return should_add_to_long, long_tp_distance_percent, long_expected_profit_usdt
         return None, None, None
     
@@ -158,6 +177,14 @@ class Strategy:
             self.exchange.print_trade_quantities_bybit(max_trade_qty, [0.001, 0.01, 0.1, 1, 2.5, 5], wallet_exposure, best_ask_price)
             self.printed_trade_quantities = True
 
+    def print_trade_quantities_once_huobi(self, max_trade_qty, symbol):
+        if not self.printed_trade_quantities:
+            wallet_exposure = self.config.wallet_exposure
+            best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
+            self.exchange.print_trade_quantities_bybit(max_trade_qty, [0.001, 0.01, 0.1, 1, 2.5, 5], wallet_exposure, best_ask_price)
+            self.printed_trade_quantities = True
+
+
     def get_1m_moving_averages(self, symbol):
         return self.manager.get_1m_moving_averages(symbol)
 
@@ -167,6 +194,101 @@ class Strategy:
     def get_positions_bybit(self):
         position_data = self.exchange.get_positions_bybit(self.symbol)
         return position_data
+
+    def calculate_next_update_time(self):
+        # 5 min interval calc
+        now = datetime.now()
+        next_update_minute = (now.minute // 5 + 1) * 5
+        if next_update_minute == 60:
+            next_update_minute = 0
+            now += timedelta(hours=1)
+        return now.replace(minute=next_update_minute, second=0, microsecond=0)
+
+    def calculate_short_take_profit_spread_bybit_fees(self, short_pos_price, quantity, symbol, decrease_percentage=0):
+        if short_pos_price is None:
+            return None
+
+        five_min_data = self.manager.get_5m_moving_averages(symbol)
+        price_precision = int(self.exchange.get_price_precision(symbol))
+
+        if five_min_data is not None:
+            ma_6_high = Decimal(five_min_data["MA_6_H"])
+            ma_6_low = Decimal(five_min_data["MA_6_L"])
+
+            try:
+                short_target_price = Decimal(short_pos_price) - (ma_6_high - ma_6_low)
+            except InvalidOperation as e:
+                print(f"Error: Invalid operation when calculating short_target_price. short_pos_price={short_pos_price}, ma_6_high={ma_6_high}, ma_6_low={ma_6_low}")
+                return None
+
+            if decrease_percentage is None:
+                decrease_percentage = 0
+
+            # Calculate the order value
+            order_value = Decimal(quantity) / short_target_price
+            # Calculate the trading fee for this order
+            trading_fee = order_value * Decimal(self.taker_fee_rate)
+            # Subtract the trading fee from the take profit target price
+            short_target_price = short_target_price - trading_fee
+
+            try:
+                short_target_price = short_target_price.quantize(
+                    Decimal('1e-{}'.format(price_precision)),
+                    rounding=ROUND_HALF_UP
+                )
+            except InvalidOperation as e:
+                print(f"Error: Invalid operation when quantizing short_target_price. short_target_price={short_target_price}, price_precision={price_precision}")
+                return None
+
+            short_target_price -= short_target_price * Decimal(decrease_percentage) / 100
+            short_profit_price = short_target_price
+
+            return float(short_profit_price)
+
+        return None
+
+    def calculate_long_take_profit_spread_bybit_fees(self, long_pos_price, quantity, symbol, increase_percentage=0):
+        if long_pos_price is None:
+            return None
+
+        five_min_data = self.manager.get_5m_moving_averages(symbol)
+        price_precision = int(self.exchange.get_price_precision(symbol))
+
+        if five_min_data is not None:
+            ma_6_high = Decimal(five_min_data["MA_6_H"])
+            ma_6_low = Decimal(five_min_data["MA_6_L"])
+
+            try:
+                long_target_price = Decimal(long_pos_price) + (ma_6_high - ma_6_low)
+            except InvalidOperation as e:
+                print(f"Error: Invalid operation when calculating long_target_price. long_pos_price={long_pos_price}, ma_6_high={ma_6_high}, ma_6_low={ma_6_low}")
+                return None
+
+            if increase_percentage is None:
+                increase_percentage = 0
+
+            # Calculate the order value
+            order_value = Decimal(quantity) / long_target_price
+            # Calculate the trading fee for this order
+            trading_fee = order_value * Decimal(self.taker_fee_rate)
+            # Add the trading fee to the take profit target price
+            long_target_price = long_target_price + trading_fee
+
+            try:
+                long_target_price = long_target_price.quantize(
+                    Decimal('1e-{}'.format(price_precision)),
+                    rounding=ROUND_HALF_UP
+                )
+            except InvalidOperation as e:
+                print(f"Error: Invalid operation when quantizing long_target_price. long_target_price={long_target_price}, price_precision={price_precision}")
+                return None
+
+            long_target_price += long_target_price * Decimal(increase_percentage) / 100
+            long_profit_price = long_target_price
+
+            return float(long_profit_price)
+
+        return None
 
     def calculate_short_take_profit_spread_bybit(self, short_pos_price, symbol, increase_percentage=0):
         if short_pos_price is None:
@@ -304,12 +426,6 @@ class Strategy:
             return float(long_profit_price)
         return None
     
-    # def calculate_short_take_profit(self, short_pos_price):
-    #     # Your existing logic here
-
-    # def calculate_long_take_profit(self, long_pos_price):
-    #     # Your existing logic here
-
     def check_short_long_conditions(self, best_bid_price, ma_3_high):
         should_short = best_bid_price > ma_3_high
         should_long = best_bid_price < ma_3_high
@@ -391,181 +507,269 @@ class Strategy:
                 return base + '/' + quote
         return None
 
+#### HUOBI ####
 
-    # def update_table(self):
-    #     print("Acquiring lock and updating table...")
-    #     with self.table.lock:  # acquire the lock
-    #         # Clear the existing table rows
-    #         self.table.table.rows.clear()
+    def calculate_short_take_profit_huobi(self, short_pos_price, symbol):
+        if short_pos_price is None:
+            return None
 
-    #         # Add rows individually
-    #         print(f'Symbol: {self.symbol}')  # print before adding
-    #         self.table.add_row('Symbol', self.symbol)
+        five_min_data = self.manager.get_5m_moving_averages(symbol)
+        price_precision = int(self.exchange.get_price_precision(symbol))
 
-    #         print(f'Long pos qty: {self.long_pos_qty}')
-    #         self.table.add_row('Long pos qty', self.long_pos_qty)
+        if five_min_data is not None:
+            ma_6_high = Decimal(five_min_data["MA_6_H"])
+            ma_6_low = Decimal(five_min_data["MA_6_L"])
 
-    #         print(f'Short pos qty: {self.short_pos_qty}')
-    #         self.table.add_row('Short pos qty', self.short_pos_qty)
+            short_target_price = Decimal(short_pos_price) - (ma_6_high - ma_6_low)
+            short_target_price = short_target_price.quantize(
+                Decimal('1e-{}'.format(price_precision)),
+                #rounding=ROUND_HALF_UP
+                rounding=ROUND_DOWN
+            )
 
-    #         print(f'Long upnl: {self.long_upnl}')
-    #         self.table.add_row('Long upnl', self.long_upnl)
+            short_profit_price = short_target_price
 
-    #         print(f'Short upnl: {self.short_upnl}')
-    #         self.table.add_row('Short upnl', self.short_upnl)
+            return float(short_profit_price)
+        return None
 
-    #         print(f'Long cum pnl: {self.cum_realised_pnl_long}')
-    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
+    def calculate_long_take_profit_huobi(self, long_pos_price, symbol):
+        if long_pos_price is None:
+            return None
 
-    #         print(f'Short cum pnl: {self.cum_realised_pnl_short}')
-    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
+        five_min_data = self.manager.get_5m_moving_averages(symbol)
+        price_precision = int(self.exchange.get_price_precision(symbol))
 
-    #         print(f'Long take profit: {self.long_take_profit}')
-    #         self.table.add_row('Long take profit', self.long_take_profit)
+        if five_min_data is not None:
+            ma_6_high = Decimal(five_min_data["MA_6_H"])
+            ma_6_low = Decimal(five_min_data["MA_6_L"])
 
-    #         print(f'Short Take profit: {self.short_take_profit}')
-    #         self.table.add_row('Short Take profit', self.short_take_profit)
-    #     print("Table updated, lock released.")
+            long_target_price = Decimal(long_pos_price) + (ma_6_high - ma_6_low)
+            long_target_price = long_target_price.quantize(
+                Decimal('1e-{}'.format(price_precision)),
+                rounding=ROUND_HALF_UP
+            )
 
-    # def update_table(self):
-    #     print("Acquiring lock and updating table...")
-    #     with self.table.lock:  # acquire the lock
-    #         # Clear the existing table rows
-    #         self.table.table.rows.clear()
+            long_profit_price = long_target_price
 
-    #         # Add rows individually
-    #         self.table.add_row('Symbol', self.symbol)
-    #         self.table.add_row('Long pos qty', self.long_pos_qty)
-    #         self.table.add_row('Short pos qty', self.short_pos_qty)
-    #         self.table.add_row('Long upnl', self.long_upnl)
-    #         self.table.add_row('Short upnl', self.short_upnl)
-    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
-    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
-    #         self.table.add_row('Long take profit', self.long_take_profit)
-    #         self.table.add_row('Short Take profit', self.short_take_profit)
-    #     print("Table updated, lock released.")
+            return float(long_profit_price)
+        return None
 
-
-    # def update_table(self):
-    #     with self.table.lock:  # acquire the lock
-    #         # Clear the existing table rows
-    #         self.table.table.rows.clear()
-
-    #         # Add rows individually
-    #         self.table.add_row('Symbol', self.symbol)
-    #         self.table.add_row('Long pos qty', self.long_pos_qty)
-    #         self.table.add_row('Short pos qty', self.short_pos_qty)
-    #         self.table.add_row('Long upnl', self.long_upnl)
-    #         self.table.add_row('Short upnl', self.short_upnl)
-    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
-    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
-    #         self.table.add_row('Long take profit', self.long_take_profit)
-    #         self.table.add_row('Short Take profit', self.short_take_profit)
-
-### WORKING ###
-    # def update_table(self):
-    #     # Clear the existing table rows
-    #     self.table.table.rows.clear()
-
-    #     # Add rows individually
-    #     self.table.add_row('Symbol', self.symbol)
-    #     self.table.add_row('Long pos qty', self.long_pos_qty)
-    #     self.table.add_row('Short pos qty', self.short_pos_qty)
-    #     self.table.add_row('Long upnl', self.long_upnl)
-    #     self.table.add_row('Short upnl', self.short_upnl)
-    #     self.table.add_row('Long cum pnl', self.cum_realised_pnl_long)
-    #     self.table.add_row('Short cum pnl', self.cum_realised_pnl_short)
-    #     self.table.add_row('Long take profit', self.long_take_profit)
-    #     self.table.add_row('Short Take profit', self.short_take_profit)
+    def get_open_take_profit_order_quantities_huobi(self, orders, side):
+        take_profit_orders = []
+        for order in orders:
+            order_info = {
+                "id": order['id'],
+                "price": order['price'],
+                "qty": order['qty'],
+                "order_status": order['order_status'],
+                "side": order['side']
+            }
+            if (
+                order_info['side'].lower() == side.lower()
+                and order_info['order_status'] == '3'  # Adjust the condition based on your order status values
+                and order_info['id'] not in (self.long_entry_order_ids if side.lower() == 'sell' else self.short_entry_order_ids)
+            ):
+                take_profit_orders.append((order_info['qty'], order_info['id']))
+        return take_profit_orders
 
 
-    # def update_table(self):
-    #     # Clear the existing table rows
-    #     self.table.table.rows.clear()
+    def get_open_take_profit_order_quantity_huobi(self, symbol, orders, side):
+        current_price = self.get_current_price(symbol)  # You'd need to implement this function
+        long_quantity = None
+        long_order_id = None
+        short_quantity = None
+        short_order_id = None
 
-    #     # Add rows individually
-    #     self.table.add_row('Symbol', self.symbol if self.symbol is not None else 'N/A')
-    #     self.table.add_row('Long pos qty', self.long_pos_qty if self.long_pos_qty is not None else 'N/A')
-    #     self.table.add_row('Short pos qty', self.short_pos_qty if self.short_pos_qty is not None else 'N/A')
-    #     self.table.add_row('Long upnl', self.long_upnl if self.long_upnl is not None else 'N/A')
-    #     self.table.add_row('Short upnl', self.short_upnl if self.short_upnl is not None else 'N/A')
-    #     self.table.add_row('Long cum pnl', self.cum_realised_pnl_long if self.cum_realised_pnl_long is not None else 'N/A')
-    #     self.table.add_row('Short cum pnl', self.cum_realised_pnl_short if self.cum_realised_pnl_short is not None else 'N/A')
-    #     self.table.add_row('Long take profit', self.long_take_profit if self.long_take_profit is not None else 'N/A')
-    #     self.table.add_row('Short Take profit', self.short_take_profit if self.short_take_profit is not None else 'N/A')
+        for order in orders:
+            order_price = float(order['price'])
+            if order['side'] == 'sell':
+                if side == "close_long" and order_price > current_price:
+                    if 'reduce_only' in order and order['reduce_only']:
+                        continue
+                    long_quantity = order['qty']
+                    long_order_id = order['id']
+                elif side == "close_short" and order_price < current_price:
+                    if 'reduce_only' in order and order['reduce_only']:
+                        continue
+                    short_quantity = order['qty']
+                    short_order_id = order['id']
+            else:
+                if side == "close_short" and order_price > current_price:
+                    if 'reduce_only' in order and not order['reduce_only']:
+                        continue
+                    short_quantity = order['qty']
+                    short_order_id = order['id']
+                elif side == "close_long" and order_price < current_price:
+                    if 'reduce_only' in order and not order['reduce_only']:
+                        continue
+                    long_quantity = order['qty']
+                    long_order_id = order['id']
 
-    # def update_table(self):
-    #     # Clear the existing table rows
-    #     self.table.table.rows.clear()
+        if side == "close_long":
+            return long_quantity, long_order_id
+        elif side == "close_short":
+            return short_quantity, short_order_id
 
-    #     # Add rows individually
-    #     try:
-    #         self.table.add_row('Symbol', self.symbol if self.symbol is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Symbol': {e}")
+        return None, None
 
-    #     try:
-    #         self.table.add_row('Long pos qty', self.long_pos_qty if self.long_pos_qty is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Long pos qty': {e}")
+    def calculate_actual_quantity_huobi(self, position_qty, parsed_symbol_swap):
+        contract_size_per_unit = self.exchange.get_contract_size_huobi(parsed_symbol_swap)
+        return position_qty * contract_size_per_unit
 
-    #     try:
-    #         self.table.add_row('Short pos qty', self.short_pos_qty if self.short_pos_qty is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Short pos qty': {e}")
+    def parse_symbol_swap_huobi(self, symbol):
+        if "huobi" in self.exchange.name.lower():
+            base_currency = symbol[:-4]
+            quote_currency = symbol[-4:] 
+            return f"{base_currency}/{quote_currency}:{quote_currency}"
+        return symbol
 
-    #     try:
-    #         self.table.add_row('Long upnl', self.long_upnl if self.long_upnl is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Long upnl': {e}")
+    def cancel_take_profit_orders_huobi(self, symbol, side):
+        self.exchange.cancel_close_huobi(symbol, side)
 
-    #     try:
-    #         self.table.add_row('Short upnl', self.short_upnl if self.short_upnl is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Short upnl': {e}")
-
-    #     try:
-    #         self.table.add_row('Long cum pnl', self.cum_realised_pnl_long if self.cum_realised_pnl_long is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Long cum pnl': {e}")
-
-    #     try:
-    #         self.table.add_row('Short cum pnl', self.cum_realised_pnl_short if self.cum_realised_pnl_short is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Short cum pnl': {e}")
-
-    #     try:
-    #         self.table.add_row('Long take profit', self.long_take_profit if self.long_take_profit is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Long take profit': {e}")
-
-    #     try:
-    #         self.table.add_row('Short Take profit', self.short_take_profit if self.short_take_profit is not None else 'N/A')
-    #     except Exception as e:
-    #         print(f"Error updating 'Short Take profit': {e}")
-
-    def update_table(self):
-        print("Updating table...")
-        # Clear the existing table rows
-        self.table.table.rows.clear()
-
-        # Add rows individually
-        rows = [
-            ('Symbol', self.symbol),
-            ('Long pos qty', self.long_pos_qty),
-            ('Short pos qty', self.short_pos_qty),
-            ('Long upnl', self.long_upnl),
-            ('Short upnl', self.short_upnl),
-            ('Long cum pnl', self.cum_realised_pnl_long),
-            ('Short cum pnl', self.cum_realised_pnl_short),
-            ('Long take profit', self.long_take_profit),
-            ('Short Take profit', self.short_take_profit),
-        ]
-
-        for label, value in rows:
+    def verify_account_type_huobi(self):
+        if not self.account_type_verified:
             try:
-                print(f"Adding row: {label}")
-                self.table.add_row(label, value if value is not None else 'N/A')
+                current_account_type = self.exchange.check_account_type_huobi()
+                print(f"Current account type at start: {current_account_type}")
+                if current_account_type['data']['account_type'] != '1':
+                    self.exchange.switch_account_type_huobi(1)
+                    time.sleep(0.05)
+                    print(f"Changed account type")
+                else:
+                    print(f"Account type is already 1")
+
+                self.account_type_verified = True  # set to True after account type is verified or changed
             except Exception as e:
-                print(f"Error updating '{label}': {e}")
-        print("Finished updating table.")
+                print(f"Error in switching account type {e}")
+                
+# RSIMFI
+
+    def initialize_MFIRSI(self, symbol):
+        df = self.exchange.fetch_ohlcv(symbol, timeframe='5m')
+
+        df['mfi'] = ta.volume.money_flow_index(df['high'], df['low'], df['close'], df['volume'], window=14)
+        df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+        df['ma'] = ta.trend.sma_indicator(df['close'], window=14)
+        df['open_less_close'] = (df['open'] < df['close']).astype(int)
+
+        df['buy_condition'] = ((df['mfi'] < 20) & (df['rsi'] < 35) & (df['open_less_close'] == 1)).astype(int)
+        df['sell_condition'] = ((df['mfi'] > 80) & (df['rsi'] > 65) & (df['open_less_close'] == 0)).astype(int)
+
+        return df
+
+
+    def should_long_MFI(self, symbol):
+        df = self.initialize_MFIRSI(symbol)
+        condition = df.iloc[-1]['buy_condition'] == 1
+        if condition:
+            self.last_mfirsi_signal = 'long'
+        return condition
+
+    def should_short_MFI(self, symbol):
+        df = self.initialize_MFIRSI(symbol)
+        condition = df.iloc[-1]['sell_condition'] == 1
+        if condition:
+            self.last_mfirsi_signal = 'short'
+        return condition
+
+    # def should_long_MFI(self, symbol):
+    #     df = self.initialize_MFIRSI(symbol)
+    #     return df.iloc[-1]['buy_condition'] == 1
+
+    # def should_short_MFI(self, symbol):
+    #     df = self.initialize_MFIRSI(symbol)
+    #     return df.iloc[-1]['sell_condition'] == 1
+
+    def parse_contract_code(self, symbol):
+        parsed_symbol = symbol.split(':')[0]  # Remove ':USDT'
+        parsed_symbol = parsed_symbol.replace('/', '-')  # Replace '/' with '-'
+        return parsed_symbol
+
+# Bybit regular auto hedge logic
+# Bybit entry logic
+
+    def bybit_hedge_entry_maker(self, symbol: str, trend: str, one_minute_volume: float, five_minute_distance: float, min_vol: float, min_dist: float, long_dynamic_amount: float, short_dynamic_amount: float, long_pos_qty: float, short_pos_qty: float, long_pos_price: float, short_pos_price: float, should_long: bool, should_short: bool, should_add_to_long: bool, should_add_to_short: bool):
+        best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
+        best_bid_price = self.exchange.get_orderbook(symbol)['bids'][0][0]
+
+        if trend is not None and isinstance(trend, str):
+            if one_minute_volume is not None and five_minute_distance is not None:
+                if one_minute_volume > min_vol and five_minute_distance > min_dist:
+
+                    if trend.lower() == "long" and should_long and long_pos_qty == 0:
+                        logging.info(f"Placing initial long entry")
+                        self.postonly_limit_order_bybit(symbol, "buy", long_dynamic_amount, best_bid_price, positionIdx=1, reduceOnly=False)
+                        logging.info(f"Placed initial long entry")
+                    else:
+                        if trend.lower() == "long" and should_add_to_long and long_pos_qty < self.max_long_trade_qty and best_bid_price < long_pos_price:
+                            logging.info(f"Placed additional long entry")
+                            self.postonly_limit_order_bybit(symbol, "buy", long_dynamic_amount, best_bid_price, positionIdx=1, reduceOnly=False)
+
+                    if trend.lower() == "short" and should_short and short_pos_qty == 0:
+                        logging.info(f"Placing initial short entry")
+                        self.postonly_limit_order_bybit(symbol, "sell", short_dynamic_amount, best_ask_price, positionIdx=2, reduceOnly=False)
+                        logging.info("Placed initial short entry")
+                    else:
+                        if trend.lower() == "short" and should_add_to_short and short_pos_qty < self.max_short_trade_qty and best_ask_price > short_pos_price:
+                            logging.info(f"Placed additional short entry")
+                            self.postonly_limit_order_bybit(symbol, "sell", short_dynamic_amount, best_bid_price, positionIdx=2, reduceOnly=False)
+
+# Bybit update take profit based on time and spread
+
+    def update_take_profit_spread_bybit(self, symbol, pos_qty, take_profit_price, positionIdx, order_side, open_orders, next_tp_update):
+        existing_tps = self.get_open_take_profit_order_quantities(open_orders, order_side)
+        total_existing_tp_qty = sum(qty for qty, _ in existing_tps)
+        logging.info(f"Existing {order_side} TPs: {existing_tps}")
+        now = datetime.now()
+        if now >= next_tp_update or not math.isclose(total_existing_tp_qty, pos_qty):
+            try:
+                for qty, existing_tp_id in existing_tps:
+                    self.exchange.cancel_order_by_id(existing_tp_id, symbol)
+                    logging.info(f"{order_side.capitalize()} take profit {existing_tp_id} canceled")
+                    time.sleep(0.05)
+                self.exchange.create_take_profit_order_bybit(symbol, "limit", order_side, pos_qty, take_profit_price, positionIdx=positionIdx, reduce_only=True)
+                logging.info(f"{order_side.capitalize()} take profit set at {take_profit_price}")
+                next_tp_update = self.calculate_next_update_time()  # Calculate the next update time after placing the order
+            except Exception as e:
+                logging.info(f"Error in updating {order_side} TP: {e}")
+        return next_tp_update
+
+# Bybit take profit placement based on 5 minute spread
+
+    def bybit_hedge_placetp_maker(self, symbol, pos_qty, take_profit_price, positionIdx, order_side, open_orders):
+        existing_tps = self.get_open_take_profit_order_quantities(open_orders, order_side)
+        total_existing_tp_qty = sum(qty for qty, _ in existing_tps)
+        logging.info(f"Existing {order_side} TPs: {existing_tps}")
+        if not math.isclose(total_existing_tp_qty, pos_qty):
+            try:
+                for qty, existing_tp_id in existing_tps:
+                    if not math.isclose(qty, pos_qty):
+                        self.exchange.cancel_order_by_id(existing_tp_id, symbol)
+                        logging.info(f"{order_side.capitalize()} take profit {existing_tp_id} canceled")
+                        time.sleep(0.05)
+            except Exception as e:
+                logging.info(f"Error in cancelling {order_side} TP orders {e}")
+
+        if len(existing_tps) < 1:
+            try:
+                # Use postonly_limit_order_bybit function to place take profit order
+                self.postonly_limit_order_bybit(symbol, order_side, pos_qty, take_profit_price, reduce_only=True)
+                logging.info(f"{order_side.capitalize()} take profit set at {take_profit_price}")
+                time.sleep(0.05)
+            except Exception as e:
+                logging.info(f"Error in placing {order_side} TP: {e}")
+
+# Bybit cancel all entries
+    def cancel_entries_bybit(self, symbol, best_ask_price, ma_1m_3_high, ma_5m_3_high):
+        # Cancel entries
+        current_time = time.time()
+        if current_time - self.last_cancel_time >= 60:  # Execute this block every 1 minute
+            try:
+                if best_ask_price < ma_1m_3_high or best_ask_price < ma_5m_3_high:
+                    self.exchange.cancel_all_entries_bybit(symbol)
+                    logging.info(f"Canceled entry orders for {symbol}")
+                    time.sleep(0.05)
+            except Exception as e:
+                logging.info(f"An error occurred while canceling entry orders: {e}")
+
+            self.last_cancel_time = current_time

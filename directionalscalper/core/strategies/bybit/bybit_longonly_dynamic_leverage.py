@@ -3,6 +3,10 @@ import math
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_DOWN
 from ..strategy import Strategy
 from typing import Tuple
+import logging
+from ..logger import Logger
+
+logging = Logger(filename="bybithedgedynamicleverage.log", stream=True)
 
 class BybitLongOnlyDynamicLeverage(Strategy):
     def __init__(self, exchange, manager, config):
@@ -155,6 +159,7 @@ class BybitLongOnlyDynamicLeverage(Strategy):
             print(f"Fetching MA data")
             m_moving_averages = self.manager.get_1m_moving_averages(symbol)
             m5_moving_averages = self.manager.get_5m_moving_averages(symbol)
+            ma_6_high = m_moving_averages["MA_6_H"]
             ma_6_low = m_moving_averages["MA_6_L"]
             ma_3_low = m_moving_averages["MA_3_L"]
             ma_3_high = m_moving_averages["MA_3_H"]
@@ -169,16 +174,18 @@ class BybitLongOnlyDynamicLeverage(Strategy):
 
             print(f"Long pos qty: {long_pos_qty}")
 
-            if long_pos_qty >= self.max_long_trade_qty:
+            if long_pos_qty >= self.max_long_trade_qty and self.long_pos_leverage <= 1.0:
                 self.max_long_trade_qty *= 2  # double the maximum long trade quantity
-                print(f"Long leverage temporarily increased to 2x")
                 self.long_leverage_increased = True
-            elif long_pos_qty < self.max_long_trade_qty:
+                self.long_pos_leverage = 2.0
+                logging.info(f"Long leverage temporarily increased to {self.long_pos_leverage}x")
+            elif long_pos_qty < (self.max_long_trade_qty / 2) and self.long_pos_leverage > 1.0:
                 self.max_long_trade_qty = self.calc_max_trade_qty(total_equity,
-                                                                  best_ask_price,
-                                                                  max_leverage)
-                print(f"Long leverage returned to normal 1x")
+                                                                best_ask_price,
+                                                                max_leverage)
                 self.long_leverage_increased = False
+                self.long_pos_leverage = 1.0
+                logging.info(f"Long leverage returned to normal {self.long_pos_leverage}x")
 
             if self.long_leverage_increased:
                 print(f"Long position currently increased to 2x")
@@ -209,12 +216,12 @@ class BybitLongOnlyDynamicLeverage(Strategy):
 
             print(f"Long TP: {long_take_profit}")
 
-            should_long = best_bid_price < ma_3_high
+            should_long = self.long_trade_condition(best_bid_price, ma_3_low)
 
             should_add_to_long = False
              
             if long_pos_price is not None:
-                should_add_to_long = long_pos_price > ma_6_low
+                should_add_to_long = long_pos_price > ma_6_high
                 long_tp_distance_percent = ((long_take_profit - long_pos_price) / long_pos_price) * 100
                 long_expected_profit_usdt = long_tp_distance_percent / 100 * long_pos_price * long_pos_qty
                 print(f"Long TP price: {long_take_profit}, TP distance in percent: {long_tp_distance_percent:.2f}%, Expected profit: {long_expected_profit_usdt:.2f} USDT")
@@ -246,7 +253,7 @@ class BybitLongOnlyDynamicLeverage(Strategy):
                     try:
                         for qty, existing_long_tp_id in existing_long_tps:
                             if not math.isclose(qty, long_pos_qty):
-                                self.exchange.cancel_take_profit_order_by_id(existing_long_tp_id, symbol)
+                                self.exchange.cancel_order_by_id(existing_long_tp_id, symbol)
                                 print(f"Long take profit {existing_long_tp_id} canceled")
                                 time.sleep(0.05)
                     except Exception as e:

@@ -3,6 +3,10 @@ import math
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_DOWN
 from ..strategy import Strategy
 from typing import Tuple
+import logging
+from ..logger import Logger
+
+logging = Logger(filename="bybitlongonlydynamic.log", stream=True)
 
 class BybitLongOnlyDynamic(Strategy):
     def __init__(self, exchange, manager, config):
@@ -112,6 +116,7 @@ class BybitLongOnlyDynamic(Strategy):
             print(f"Fetching MA data")
             m_moving_averages = self.manager.get_1m_moving_averages(symbol)
             m5_moving_averages = self.manager.get_5m_moving_averages(symbol)
+            ma_6_high = m_moving_averages["MA_6_H"]
             ma_6_low = m_moving_averages["MA_6_L"]
             ma_3_low = m_moving_averages["MA_3_L"]
             ma_3_high = m_moving_averages["MA_3_H"]
@@ -141,14 +146,13 @@ class BybitLongOnlyDynamic(Strategy):
             # Take profit calc
             long_take_profit = self.calculate_long_take_profit_spread_bybit(long_pos_price, symbol, five_minute_distance)
 
-            should_short = best_bid_price > ma_3_high
-            should_long = best_bid_price < ma_3_high
+            should_long = self.long_trade_condition(best_bid_price, ma_3_low)
 
             should_add_to_short = False
             should_add_to_long = False
              
             if long_pos_price is not None:
-                should_add_to_long = long_pos_price > ma_6_low
+                should_add_to_long = long_pos_price > ma_6_high
                 long_tp_distance_percent = ((long_take_profit - long_pos_price) / long_pos_price) * 100
                 long_expected_profit_usdt = long_tp_distance_percent / 100 * long_pos_price * long_pos_qty
                 print(f"Long TP price: {long_take_profit}, TP distance in percent: {long_tp_distance_percent:.2f}%, Expected profit: {long_expected_profit_usdt:.2f} USDT")
@@ -180,7 +184,7 @@ class BybitLongOnlyDynamic(Strategy):
                     try:
                         for qty, existing_long_tp_id in existing_long_tps:
                             if not math.isclose(qty, long_pos_qty):
-                                self.exchange.cancel_take_profit_order_by_id(existing_long_tp_id, symbol)
+                                self.exchange.cancel_order_by_id(existing_long_tp_id, symbol)
                                 print(f"Long take profit {existing_long_tp_id} canceled")
                                 time.sleep(0.05)
                     except Exception as e:
