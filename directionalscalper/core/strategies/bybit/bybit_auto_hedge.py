@@ -288,12 +288,12 @@ class BybitAutoHedgeStrategy(Strategy):
                 short_liq_price = position_data["short"]["liq_price"]
                 long_liq_price = position_data["long"]["liq_price"]
 
-                if long_pos_qty >= self.max_long_trade_qty and self.long_pos_leverage <= 1.0:
+                if long_pos_qty >= self.max_long_trade_qty and self.long_pos_leverage <= 2.0:
                     self.max_long_trade_qty *= 2  # double the maximum long trade quantity
                     self.long_leverage_increased = True
-                    self.long_pos_leverage = 2.0
+                    self.long_pos_leverage *= 2.0
                     logging.info(f"Long leverage temporarily increased to {self.long_pos_leverage}x")
-                elif long_pos_qty < (self.max_long_trade_qty / 2) and self.long_pos_leverage > 1.0:
+                elif long_pos_qty < (self.max_long_trade_qty / self.long_pos_leverage) and self.long_pos_leverage > 1.0:
                     self.max_long_trade_qty = self.calc_max_trade_qty(total_equity,
                                                                     best_ask_price,
                                                                     max_leverage)
@@ -301,12 +301,12 @@ class BybitAutoHedgeStrategy(Strategy):
                     self.long_pos_leverage = 1.0
                     logging.info(f"Long leverage returned to normal {self.long_pos_leverage}x")
 
-                if short_pos_qty >= self.max_short_trade_qty and self.short_pos_leverage <= 1.0:
+                if short_pos_qty >= self.max_short_trade_qty and self.short_pos_leverage <= 2.0:
                     self.max_short_trade_qty *= 2  # double the maximum short trade quantity
                     self.short_leverage_increased = True
-                    self.short_pos_leverage = 2.0
+                    self.short_pos_leverage *= 2.0
                     logging.info(f"Short leverage temporarily increased to {self.short_pos_leverage}x")
-                elif short_pos_qty < (self.max_short_trade_qty / 2) and self.short_pos_leverage > 1.0:
+                elif short_pos_qty < (self.max_short_trade_qty / self.short_pos_leverage) and self.short_pos_leverage > 1.0:
                     self.max_short_trade_qty = self.calc_max_trade_qty(total_equity,
                                                                     best_ask_price,
                                                                     max_leverage)
@@ -340,19 +340,19 @@ class BybitAutoHedgeStrategy(Strategy):
                 previous_five_minute_distance = five_minute_distance
 
                 should_short = self.short_trade_condition(best_ask_price, ma_3_high)
-                should_long = self.long_trade_condition(best_bid_price, ma_3_low)
+                should_long = self.long_trade_condition(best_bid_price, ma_3_high)
 
                 should_add_to_short = False
                 should_add_to_long = False
             
                 if short_pos_price is not None:
-                    should_add_to_short = short_pos_price < ma_6_low and self.short_trade_condition(best_ask_price, ma_6_high)
+                    should_add_to_short = short_pos_price < ma_6_low # and self.short_trade_condition(best_ask_price, ma_6_high)
                     self.short_tp_distance_percent = ((short_take_profit - short_pos_price) / short_pos_price) * 100
                     self.short_expected_profit_usdt = abs(self.short_tp_distance_percent / 100 * short_pos_price * short_pos_qty)
                     logging.info(f"Short TP price: {short_take_profit}, TP distance in percent: {-self.short_tp_distance_percent:.2f}%, Expected profit: {self.short_expected_profit_usdt:.2f} USDT")
 
                 if long_pos_price is not None:
-                    should_add_to_long = long_pos_price > ma_6_high and self.long_trade_condition(best_bid_price, ma_6_low)
+                    should_add_to_long = long_pos_price > ma_6_high # and self.long_trade_condition(best_bid_price, ma_6_low)
                     self.long_tp_distance_percent = ((long_take_profit - long_pos_price) / long_pos_price) * 100
                     self.long_expected_profit_usdt = self.long_tp_distance_percent / 100 * long_pos_price * long_pos_qty
                     logging.info(f"Long TP price: {long_take_profit}, TP distance in percent: {self.long_tp_distance_percent:.2f}%, Expected profit: {self.long_expected_profit_usdt:.2f} USDT")
