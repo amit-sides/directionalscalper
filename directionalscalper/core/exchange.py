@@ -1182,6 +1182,19 @@ class Exchange:
             logging.info(f"An unknown error occurred in get_positions(): {e}")
         return current_price
 
+    # Binance
+    def get_current_price_binance(self, symbol: str) -> float:
+        current_price = 0.0
+        try:
+            orderbook = self.exchange.fetch_order_book(symbol)
+            highest_bid = orderbook['bids'][0][0] if len(orderbook['bids']) > 0 else None
+            lowest_ask = orderbook['asks'][0][0] if len(orderbook['asks']) > 0 else None
+            if highest_bid and lowest_ask:
+                current_price = (highest_bid + lowest_ask) / 2
+        except Exception as e:
+            logging.info(f"An unknown error occurred in get_current_price_binance(): {e}")
+        return current_price
+        
     def get_moving_averages(self, symbol: str, timeframe: str = "1m", num_bars: int = 20, max_retries=3, retry_delay=5) -> dict:
         values = {"MA_3_H": 0.0, "MA_3_L": 0.0, "MA_6_H": 0.0, "MA_6_L": 0.0}
 
@@ -1494,6 +1507,28 @@ class Exchange:
         except Exception as e:
             logging.warning(f"An unknown error occurred in cancel_entry(): {e}")
 
+    def binance_set_leverage(self, leverage, symbol: Optional[str] = None, params={}):
+        # here we're assuming that maximum allowed leverage is 125 for the symbol
+        # but the actual value can vary based on the symbol and the user's account
+        max_leverage = 125 
+        if leverage > max_leverage:
+            print(f"Requested leverage of {leverage}x exceeds maximum allowed leverage of {max_leverage}x for {symbol}.")
+            return None
+        try:
+            response = self.exchange.set_leverage(leverage, symbol, params)
+            return response
+        except Exception as e:
+            print(f"An error occurred while setting the leverage: {e}")
+
+    def binance_set_margin_mode(self, margin_mode: str, symbol: Optional[str] = None, params={}):
+        if margin_mode not in ['ISOLATED', 'CROSSED']:
+            print(f"Invalid margin mode {margin_mode} for {symbol}. Allowed modes are 'ISOLATED' and 'CROSSED'.")
+            return None
+        try:
+            response = self.exchange.set_margin_mode(margin_mode, symbol, params)
+            return response
+        except Exception as e:
+            print(f"An error occurred while setting the margin mode: {e}")
 
     # Binance
     def get_max_leverage_binance(self, symbol):
@@ -2038,7 +2073,23 @@ class Exchange:
         order = self.create_limit_order_binance(symbol, side, amount, price, params)
 
         return order
-    
+
+    def binance_create_limit_order(self, symbol: str, side: str, amount: float, price: float, params={}):
+        """
+        create a limit order
+        :param str symbol: unified symbol of the market to create an order in
+        :param str side: 'buy' or 'sell'
+        :param float amount: how much of currency you want to trade in units of base currency
+        :param float price: the price at which the order is to be fulfilled, in units of the quote currency
+        :param dict [params]: extra parameters specific to the binance api endpoint
+        :returns dict: an `order structure <https://docs.ccxt.com/#/?id=order-structure>`
+        """
+        try:
+            order = self.exchange.create_order(symbol, "limit", side, amount, price, params)
+            return order
+        except Exception as e:
+            print(f"An error occurred while creating the limit order: {e}")
+
     # Binance
     def create_limit_order_binance(self, symbol: str, side: str, qty: float, price: float, params={}):
         try:
