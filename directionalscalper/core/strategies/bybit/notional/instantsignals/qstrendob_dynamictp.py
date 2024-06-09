@@ -12,13 +12,14 @@ from directionalscalper.core.strategies.bybit.bybit_strategy import BybitStrateg
 from directionalscalper.core.exchanges.bybit import BybitExchange
 from directionalscalper.core.strategies.logger import Logger
 from live_table_manager import shared_symbols_data
-logging = Logger(logger_name="BybitQSGridNotional", filename="BybitQSGridNotional.log", stream=True)
+logging = Logger(logger_name="BybitQuickScalpTrendDynamicTP", filename="BybitQuickScalpTrendDynamicTP.log", stream=True)
 
 symbol_locks = {}
 
-class BybitQSGridNotional(BybitStrategy):
-    def __init__(self, exchange, manager, config, symbols_allowed=None):
+class BybitQuickScalpTrendDynamicTP(BybitStrategy):
+    def __init__(self, exchange, manager, config, symbols_allowed=None, rotator_symbols_standardized=None, mfirsi_signal=None):
         super().__init__(exchange, config, manager, symbols_allowed)
+        self.mfirsi_signal = mfirsi_signal
         self.is_order_history_populated = False
         self.last_health_check_time = time.time()
         self.health_check_interval = 600
@@ -43,7 +44,30 @@ class BybitQSGridNotional(BybitStrategy):
             self.reissue_threshold = self.config.linear_grid['reissue_threshold']
             self.buffer_percentage = self.config.linear_grid['buffer_percentage']
             self.enforce_full_grid = self.config.linear_grid['enforce_full_grid']
+            self.initial_entry_buffer_pct = self.config.linear_grid['initial_entry_buffer_pct']
+            self.min_buffer_percentage = self.config.linear_grid['min_buffer_percentage']
+            self.max_buffer_percentage = self.config.linear_grid['max_buffer_percentage']
+            self.wallet_exposure_limit_long = self.config.linear_grid['wallet_exposure_limit_long']
+            self.wallet_exposure_limit_short = self.config.linear_grid['wallet_exposure_limit_short']
+            self.min_buffer_percentage_ar = self.config.linear_grid['min_buffer_percentage_ar']
+            self.max_buffer_percentage_ar = self.config.linear_grid['max_buffer_percentage_ar']
+            self.upnl_auto_reduce_threshold_long = self.config.linear_grid['upnl_auto_reduce_threshold_long']
+            self.upnl_auto_reduce_threshold_short = self.config.linear_grid['upnl_auto_reduce_threshold_short']
+            self.failsafe_enabled = self.config.linear_grid['failsafe_enabled']
+            self.long_failsafe_upnl_pct = self.config.linear_grid['long_failsafe_upnl_pct']
+            self.short_failsafe_upnl_pct = self.config.linear_grid['short_failsafe_upnl_pct']
+            self.failsafe_start_pct = self.config.linear_grid['failsafe_start_pct']
+            self.auto_reduce_cooldown_enabled = self.config.linear_grid['auto_reduce_cooldown_enabled']
+            self.auto_reduce_cooldown_start_pct = self.config.linear_grid['auto_reduce_cooldown_start_pct']
+            self.max_qty_percent_long = self.config.linear_grid['max_qty_percent_long']
+            self.max_qty_percent_short = self.config.linear_grid['max_qty_percent_short']
+            self.min_outer_price_distance = self.config.linear_grid['min_outer_price_distance']
+            self.max_outer_price_distance = self.config.linear_grid['max_outer_price_distance']
             # self.reissue_threshold_inposition = self.config.linear_grid['reissue_threshold_inposition']
+                                            #  failsafe_enabled,
+                                            #  long_failsafe_upnl_pct,
+                                            #  short_failsafe_upnl_pct,
+                                            #  failsafe_start_pct)
             self.upnl_threshold_pct = self.config.upnl_threshold_pct
             self.volume_check = self.config.volume_check
             self.max_usd_value = self.config.max_usd_value
@@ -54,6 +78,7 @@ class BybitQSGridNotional(BybitStrategy):
             except AttributeError as e:
                 logging.error(f"Failed to initialize attributes from config: {e}")
             self.upnl_profit_pct = self.config.upnl_profit_pct
+            self.max_upnl_profit_pct = self.config.max_upnl_profit_pct
             self.stoploss_enabled = self.config.stoploss_enabled
             self.stoploss_upnl_pct = self.config.stoploss_upnl_pct
             self.liq_stoploss_enabled = self.config.liq_stoploss_enabled
@@ -70,8 +95,7 @@ class BybitQSGridNotional(BybitStrategy):
         except AttributeError as e:
             logging.error(f"Failed to initialize attributes from config: {e}")
 
-
-    def run(self, symbol, rotator_symbols_standardized=None):
+    def run(self, symbol, rotator_symbols_standardized=None, mfirsi_signal=None):
         try:
             standardized_symbol = symbol.upper()  # Standardize the symbol name
             logging.info(f"Standardized symbol: {standardized_symbol}")
@@ -83,7 +107,7 @@ class BybitQSGridNotional(BybitStrategy):
             if symbol_locks[standardized_symbol].acquire(blocking=False):
                 logging.info(f"Lock acquired for symbol {standardized_symbol} by thread {current_thread_id}")
                 try:
-                    self.run_single_symbol(standardized_symbol, rotator_symbols_standardized)
+                    self.run_single_symbol(standardized_symbol, rotator_symbols_standardized, mfirsi_signal)
                 finally:
                     symbol_locks[standardized_symbol].release()
                     logging.info(f"Lock released for symbol {standardized_symbol} by thread {current_thread_id}")
@@ -92,11 +116,14 @@ class BybitQSGridNotional(BybitStrategy):
         except Exception as e:
             logging.info(f"Exception in run function {e}")
 
-    def run_single_symbol(self, symbol, rotator_symbols_standardized=None):
+    def run_single_symbol(self, symbol, rotator_symbols_standardized=None, mfirsi_signal=None):
         try:
             logging.info(f"Starting to process symbol: {symbol}")
             logging.info(f"Initializing default values for symbol: {symbol}")
 
+            self.running_long = True
+            self.running_short = True
+            
             previous_long_pos_qty = 0
             previous_short_pos_qty = 0
 
@@ -121,9 +148,9 @@ class BybitQSGridNotional(BybitStrategy):
 
             # Initializing time trackers for less frequent API calls
             last_equity_fetch_time = 0
-            equity_refresh_interval = 1800  # 30 minutes in seconds
+            equity_refresh_interval = 30  # 30 minutes in seconds
 
-            # Clean out orders
+            # # Clean out orders
             # self.exchange.cancel_all_orders_for_symbol_bybit(symbol)
             # logging.info(f"Canceled all orders for {symbol}")
 
@@ -131,9 +158,11 @@ class BybitQSGridNotional(BybitStrategy):
             self.current_leverage = self.exchange.get_current_max_leverage_bybit(symbol)
             self.max_leverage = self.exchange.get_current_max_leverage_bybit(symbol)
 
+            logging.info(f"Current leverage: {self.current_leverage}")
+
             logging.info(f"Max leverage for {symbol}: {self.max_leverage}")
 
-            self.adjust_risk_parameters_qstrend(exchange_max_leverage=self.max_leverage)
+            self.adjust_risk_parameters(exchange_max_leverage=self.max_leverage)
 
             self.exchange.set_leverage_bybit(self.max_leverage, symbol)
             self.exchange.set_symbol_to_cross_margin(symbol, self.max_leverage)
@@ -157,6 +186,25 @@ class BybitQSGridNotional(BybitStrategy):
             reissue_threshold = self.config.linear_grid['reissue_threshold']
             buffer_percentage = self.config.linear_grid['buffer_percentage']
             enforce_full_grid = self.config.linear_grid['enforce_full_grid']
+            initial_entry_buffer_pct = self.config.linear_grid['initial_entry_buffer_pct']
+            min_buffer_percentage = self.config.linear_grid['min_buffer_percentage']
+            max_buffer_percentage = self.config.linear_grid['max_buffer_percentage']
+            wallet_exposure_limit_long = self.config.linear_grid['wallet_exposure_limit_long']
+            wallet_exposure_limit_short = self.config.linear_grid['wallet_exposure_limit_short']
+            min_buffer_percentage_ar = self.config.linear_grid['min_buffer_percentage_ar']
+            max_buffer_percentage_ar = self.config.linear_grid['max_buffer_percentage_ar']
+            upnl_auto_reduce_threshold_long = self.config.linear_grid['upnl_auto_reduce_threshold_long']
+            upnl_auto_reduce_threshold_short = self.config.linear_grid['upnl_auto_reduce_threshold_short']
+            failsafe_enabled = self.config.linear_grid['failsafe_enabled']
+            long_failsafe_upnl_pct = self.config.linear_grid['long_failsafe_upnl_pct']
+            short_failsafe_upnl_pct = self.config.linear_grid['short_failsafe_upnl_pct']
+            failsafe_start_pct = self.config.linear_grid['failsafe_start_pct']
+            auto_reduce_cooldown_enabled = self.config.linear_grid['auto_reduce_cooldown_enabled']
+            auto_reduce_cooldown_start_pct = self.config.linear_grid['auto_reduce_cooldown_start_pct']
+            max_qty_percent_long = self.config.linear_grid['max_qty_percent_long']
+            max_qty_percent_short = self.config.linear_grid['max_qty_percent_short']
+            min_outer_price_distance = self.config.linear_grid['min_outer_price_distance']
+            max_outer_price_distance = self.config.linear_grid['max_outer_price_distance']
             # reissue_threshold_inposition = self.config.linear_grid['reissue_threshold_inposition']
 
             volume_check = self.config.volume_check
@@ -165,6 +213,7 @@ class BybitQSGridNotional(BybitStrategy):
 
             upnl_threshold_pct = self.config.upnl_threshold_pct
             upnl_profit_pct = self.config.upnl_profit_pct
+            max_upnl_profit_pct = self.config.max_upnl_profit_pct
 
             # Stop loss
             stoploss_enabled = self.config.stoploss_enabled
@@ -199,39 +248,6 @@ class BybitQSGridNotional(BybitStrategy):
 
             # Hedge price diff
             price_difference_threshold = self.config.hedge_price_difference_threshold
-
-            if self.config.dashboard_enabled:
-                try:
-                    dashboard_path = os.path.join(self.config.shared_data_path, "shared_data.json")
-                    logging.info(f"Dashboard path: {dashboard_path}")
-
-                    # Ensure the directory exists
-                    os.makedirs(os.path.dirname(dashboard_path), exist_ok=True)
-                    logging.info(f"Directory created: {os.path.dirname(dashboard_path)}")
-
-                    if os.path.exists(dashboard_path):
-                        with open(dashboard_path, "r") as file:
-                            # Read or process file data
-                            data = json.load(file)
-                            logging.info("Loaded existing data from shared_data.json")
-                    else:
-                        logging.warning("shared_data.json does not exist. Creating a new file.")
-                        data = {}  # Initialize data as an empty dictionary
-
-                    # Save the updated data to the JSON file
-                    with open(dashboard_path, "w") as file:
-                        json.dump(data, file)
-                        logging.info("Data saved to shared_data.json")
-
-                except FileNotFoundError:
-                    logging.error(f"File not found: {dashboard_path}")
-                    # Handle the absence of the file, e.g., by creating it or using default data
-                except IOError as e:
-                    logging.error(f"I/O error occurred: {e}")
-                    # Handle other I/O errors
-                except Exception as e:
-                    logging.error(f"An unexpected error occurred: {e}")
-                    
                     
             logging.info("Setting up exchange")
             self.exchange.setup_exchange_bybit(symbol)
@@ -242,7 +258,7 @@ class BybitQSGridNotional(BybitStrategy):
             since_timestamp = int((datetime.now() - timedelta(days=1)).timestamp() * 1000)  # 24 hours ago in milliseconds
             recent_trades = self.fetch_recent_trades_for_symbol(symbol, since=since_timestamp, limit=20)
 
-            logging.info(f"Recent trades for {symbol} : {recent_trades}")
+            #logging.info(f"Recent trades for {symbol} : {recent_trades}")
 
             # Check if there are any trades in the last 24 hours
             recent_activity = any(trade['timestamp'] >= since_timestamp for trade in recent_trades)
@@ -253,6 +269,7 @@ class BybitQSGridNotional(BybitStrategy):
 
 
             while self.running_long or self.running_short:
+
                 current_time = time.time()
 
                 iteration_start_time = time.time()
@@ -275,7 +292,7 @@ class BybitQSGridNotional(BybitStrategy):
                 open_position_data = self.retry_api_call(self.exchange.get_all_open_positions_bybit)
 
                 
-                logging.info(f"Open position data for {symbol}: {open_position_data}")
+                #logging.info(f"Open position data for {symbol}: {open_position_data}")
 
                 position_details = {}
 
@@ -314,9 +331,9 @@ class BybitQSGridNotional(BybitStrategy):
                 logging.info(f"Open symbols: {open_symbols}")
                 open_orders = self.retry_api_call(self.exchange.get_open_orders, symbol)
 
-                logging.info(f"Open symbols: {open_symbols}")
+                #logging.info(f"Open symbols: {open_symbols}")
 
-                logging.info(f"Open orders: {open_orders}")
+                #logging.info(f"Open orders: {open_orders}")
 
                 market_data = self.get_market_data_with_retry(symbol, max_retries=100, retry_delay=5)
                 min_qty = float(market_data["min_qty"])
@@ -386,6 +403,8 @@ class BybitQSGridNotional(BybitStrategy):
                 logging.info(f"Checking trading for symbol {symbol}. Can trade: {trading_allowed}")
                 logging.info(f"Symbol: {symbol}, In open_symbols: {symbol in open_symbols}, Trading allowed: {trading_allowed}")
 
+                # self.adjust_risk_parameters()
+
                 # self.initialize_symbol(symbol, total_equity, best_ask_price, self.max_leverage)
 
                 # Log the currently initialized symbols
@@ -401,16 +420,82 @@ class BybitQSGridNotional(BybitStrategy):
 
                 logging.info(f"Symbol precision for {symbol} : {symbol_precision}")
 
+
                 long_pos_qty = position_details.get(symbol, {}).get('long', {}).get('qty', 0)
                 short_pos_qty = position_details.get(symbol, {}).get('short', {}).get('qty', 0)
-                # Update the previous position quantities
+
+
+                # Position side for symbol recently closed
+                logging.info(f"Previous long pos qty for {symbol} : {previous_long_pos_qty}")
+                logging.info(f"Previous short pos qty for {symbol} : {previous_short_pos_qty}")
+
+                logging.info(f"Current long pos qty for {symbol} {long_pos_qty}")
+                logging.info(f"Current short pos qty for {symbol} {short_pos_qty}")
+
+                # Check for position inactivity
+                inactive_pos_time_threshold = 180  # 3 minutes in seconds
+                if self.check_position_inactivity(symbol, inactive_pos_time_threshold, long_pos_qty, short_pos_qty, previous_long_pos_qty, previous_short_pos_qty):
+                    logging.info(f"No open positions for {symbol} in the last {inactive_pos_time_threshold} seconds. Terminating the thread.")
+                    shared_symbols_data.pop(symbol, None)
+                    break
+
+                # Optionally, break out of the loop if all trading sides are closed
+                if not self.running_long and not self.running_short:
+                    shared_symbols_data.pop(symbol, None)
+                    self.cancel_grid_orders(symbol, "buy")
+                    self.cancel_grid_orders(symbol, "sell")
+                    self.active_grids.discard(symbol)
+                    self.cleanup_before_termination(symbol)
+                    logging.info("Both long and short operations have terminated. Exiting the loop.")
+                    break
+                
+                # Determine if positions have just been closed
+                if previous_long_pos_qty > 0 and long_pos_qty == 0:
+                    logging.info(f"All long positions for {symbol} were recently closed. Checking for inactivity.")
+                    inactive_long = True
+                else:
+                    inactive_long = False
+
+                if previous_short_pos_qty > 0 and short_pos_qty == 0:
+                    logging.info(f"All short positions for {symbol} were recently closed. Checking for inactivity.")
+                    inactive_short = True
+                else:
+                    inactive_short = False
+
+                # Update previous quantities for the next iteration
                 previous_long_pos_qty = long_pos_qty
                 previous_short_pos_qty = short_pos_qty
 
-                terminate_long, terminate_short = self.should_terminate_open_orders(symbol, long_pos_qty, short_pos_qty, open_position_data, open_orders, current_time)
-                logging.info(f"Terminate long: {terminate_long}, Terminate short: {terminate_short}")
+                # Actions based on inactivity
+                if inactive_long:
+                    logging.info(f"No active long positions and previous positions were closed for {symbol}. Terminating long operations.")
+                    self.running_long = False
+                    self.cancel_grid_orders(symbol, "buy")
+                    self.clear_grid(symbol, 'buy')
+                    self.active_grids.discard(symbol)
+                    #self.cleanup_before_termination(symbol)
+                    
+                    # Remove symbol from shared_symbols_data if there are no active short positions
+                    if short_pos_qty == 0:
+                        shared_symbols_data.pop(symbol, None)
+                        break
 
-                global thread_termination_status
+                if inactive_short:
+                    logging.info(f"No active short positions and previous positions were closed for {symbol}. Terminating short operations.")
+                    self.cancel_grid_orders(symbol, "sell")
+                    self.clear_grid(symbol, 'sell')
+                    self.active_grids.discard(symbol)
+                    #self.cleanup_before_termination(symbol)
+                    self.running_short = False
+                    
+                    # Remove symbol from shared_symbols_data if there are no active long positions
+                    if long_pos_qty == 0:
+                        shared_symbols_data.pop(symbol, None)
+                        break
+            
+                terminate_long, terminate_short = self.should_terminate_open_orders(symbol, long_pos_qty, short_pos_qty, open_position_data, open_orders, current_time)
+
+                logging.info(f"Terminate long: {terminate_long}, Terminate short: {terminate_short}")
 
                 try:
                     if terminate_long:
@@ -418,15 +503,11 @@ class BybitQSGridNotional(BybitStrategy):
                         self.cancel_grid_orders(symbol, "buy")
                         self.cleanup_before_termination(symbol)
                         self.running_long = False  # Set the flag to stop the long thread
-                        thread_termination_status[symbol] = True  # Update the termination status
-
                     if terminate_short:
                         logging.info(f"Should terminate short orders for {symbol}")
                         self.cancel_grid_orders(symbol, "sell")
                         self.cleanup_before_termination(symbol)
                         self.running_short = False  # Set the flag to stop the short thread
-                        thread_termination_status[symbol] = True  # Update the termination status
-
                 except Exception as e:
                     logging.info(f"Exception caught in termination {e}")
 
@@ -434,19 +515,6 @@ class BybitQSGridNotional(BybitStrategy):
                     logging.info("Both long and short operations have ended. Preparing to exit loop.")
                     shared_symbols_data.pop(symbol, None)  # Remove the symbol from shared_symbols_data
 
-                    # Check if a position has been closed
-                    if previous_long_pos_qty > 0 and long_pos_qty == 0:
-                        logging.info(f"Long position closed for {symbol}. Canceling long grid orders.")
-                        self.cancel_grid_orders(symbol, "buy")
-                        self.cleanup_before_termination(symbol)
-                        self.running_long = False  # Set the flag to stop the long thread
-
-                    if previous_short_pos_qty > 0 and short_pos_qty == 0:
-                        logging.info(f"Short position closed for {symbol}. Canceling short grid orders.")
-                        self.cancel_grid_orders(symbol, "sell")
-                        self.cleanup_before_termination(symbol)
-                        self.running_short = False  # Set the flag to stop the short thread
-                    
                 # If the symbol is in rotator_symbols and either it's already being traded or trading is allowed.
                 if symbol in rotator_symbols_standardized or (symbol in open_symbols or trading_allowed): # and instead of or
 
@@ -465,8 +533,8 @@ class BybitQSGridNotional(BybitStrategy):
                     ema_trend = metrics['EMA Trend']
 
                     #mfirsi_signal = metrics['MFI']
-                    #mfirsi_signal = self.get_mfirsi_ema(symbol, limit=100, lookback=1, ema_period=5)
-                    mfirsi_signal = self.get_mfirsi_ema_secondary_ema(symbol, limit=100, lookback=1, ema_period=5, secondary_ema_period=3)
+                    #mfirsi_signal = self.get_mfirsi_ema(symbol, limit=100, lookback=5, ema_period=5)
+                    #mfirsi_signal = self.get_mfirsi_ema_secondary_ema(symbol, limit=100, lookback=1, ema_period=5, secondary_ema_period=3)
 
                     funding_rate = metrics['Funding']
                     hma_trend = metrics['HMA Trend']
@@ -490,13 +558,6 @@ class BybitQSGridNotional(BybitStrategy):
                     logging.info(f"Long liquidation price for {symbol}: {long_liquidation_price}")
                     logging.info(f"Short liquidation price for {symbol}: {short_liquidation_price}")
 
-                    long_pos_qty = position_details.get(symbol, {}).get('long', {}).get('qty', 0)
-                    short_pos_qty = position_details.get(symbol, {}).get('short', {}).get('qty', 0)
-
-                    # Update the previous position quantities
-                    previous_long_pos_qty = long_pos_qty
-                    previous_short_pos_qty = short_pos_qty
-
                     logging.info(f"Rotator symbol trading: {symbol}")
                                 
                     logging.info(f"Rotator symbols: {rotator_symbols_standardized}")
@@ -513,7 +574,7 @@ class BybitQSGridNotional(BybitStrategy):
                     self.adjust_risk_parameters(exchange_max_leverage=self.max_leverage)
 
                     # Calculate dynamic entry sizes for long and short positions
-                    long_dynamic_amount, short_dynamic_amount = self.calculate_dynamic_amounts(
+                    long_dynamic_amount, short_dynamic_amount = self.calculate_dynamic_amounts_notional(
                         symbol=symbol,
                         total_equity=total_equity,
                         best_ask_price=best_ask_price,
@@ -534,8 +595,8 @@ class BybitQSGridNotional(BybitStrategy):
                     long_take_profit = None
 
                     # Calculate take profit for short and long positions using quickscalp method
-                    short_take_profit = self.calculate_quickscalp_short_take_profit(short_pos_price, symbol, upnl_profit_pct)
-                    long_take_profit = self.calculate_quickscalp_long_take_profit(long_pos_price, symbol, upnl_profit_pct)
+                    short_take_profit = self.calculate_quickscalp_short_take_profit_dynamic_distance(short_pos_price, symbol, min_upnl_profit_pct=upnl_profit_pct, max_upnl_profit_pct=max_upnl_profit_pct)
+                    long_take_profit = self.calculate_quickscalp_long_take_profit_dynamic_distance(long_pos_price, symbol, min_upnl_profit_pct=upnl_profit_pct, max_upnl_profit_pct=max_upnl_profit_pct)
 
                     short_stop_loss = None
                     long_stop_loss = None
@@ -544,7 +605,75 @@ class BybitQSGridNotional(BybitStrategy):
                     initial_long_stop_loss = None
 
                     try:
-                        self.auto_reduce_logic_grid(
+                        self.failsafe_method_leveraged(symbol,
+                                             long_pos_qty,
+                                             short_pos_qty,
+                                             long_pos_price,
+                                             short_pos_price,
+                                             long_upnl,
+                                             short_upnl,
+                                             total_equity,
+                                             current_price,
+                                             failsafe_enabled,
+                                             long_failsafe_upnl_pct,
+                                             short_failsafe_upnl_pct,
+                                             failsafe_start_pct)
+                    except Exception as e:
+                        logging.info(f"Failsafe failed: {e}")
+
+                    try:
+                        self.auto_reduce_logic_grid_hardened_cooldown(
+                            symbol,
+                            min_qty,
+                            long_pos_price,
+                            short_pos_price,
+                            long_pos_qty,
+                            short_pos_qty,
+                            long_upnl,
+                            short_upnl,
+                            auto_reduce_cooldown_enabled,
+                            total_equity,
+                            current_price,
+                            long_dynamic_amount,
+                            short_dynamic_amount,
+                            auto_reduce_cooldown_start_pct,
+                            min_buffer_percentage_ar,
+                            max_buffer_percentage_ar,
+                            upnl_auto_reduce_threshold_long,
+                            upnl_auto_reduce_threshold_short,
+                            self.current_leverage
+                        )
+                    except Exception as e:
+                        logging.info(f"Hardened grid AR exception caught {e}")
+
+                    try:
+                        self.auto_reduce_logic_grid_hardened(
+                            symbol,
+                            min_qty,
+                            long_pos_price,
+                            short_pos_price,
+                            long_pos_qty,
+                            short_pos_qty,
+                            long_upnl,
+                            short_upnl,
+                            auto_reduce_enabled,
+                            total_equity,
+                            current_price,
+                            long_dynamic_amount,
+                            short_dynamic_amount,
+                            auto_reduce_start_pct,
+                            min_buffer_percentage_ar,
+                            max_buffer_percentage_ar,
+                            upnl_auto_reduce_threshold_long,
+                            upnl_auto_reduce_threshold_short,
+                            self.current_leverage
+                        )
+                    except Exception as e:
+                        logging.info(f"Hardened grid AR exception caught {e}")
+
+                    # Old autoreduce logic
+                    try:
+                        self.auto_reduce_logic_simple(
                             symbol,
                             min_qty,
                             long_pos_price,
@@ -563,8 +692,7 @@ class BybitQSGridNotional(BybitStrategy):
                             shared_symbols_data=shared_symbols_data
                         )
                     except Exception as e:
-                        logging.info(f"Exception caught in auto_reduce_logic_grid {e}")
-
+                        logging.info(f"Exception caught in autoreduce {e}")
 
                     self.auto_reduce_percentile_logic(
                         symbol,
@@ -665,6 +793,8 @@ class BybitQSGridNotional(BybitStrategy):
 
                     logging.info(f"Open TP order count {tp_order_counts}")
 
+                    #print(type(tp_order_counts))
+
                     # Check for long position
                     if long_pos_qty > 0:
                         try:
@@ -687,33 +817,31 @@ class BybitQSGridNotional(BybitStrategy):
                     long_tp_counts = tp_order_counts['long_tp_count']
                     short_tp_counts = tp_order_counts['short_tp_count']
 
-                    self.linear_grid_handle_positions_mfirsi_persistent_notional(
-                        symbol,
-                        open_symbols,
-                        total_equity,
-                        long_pos_price,
-                        short_pos_price,
-                        long_pos_qty,
-                        short_pos_qty,
-                        levels,
-                        strength,
-                        outer_price_distance,
-                        reissue_threshold,
-                        self.wallet_exposure_limit,
-                        self.user_defined_leverage_long,
-                        self.user_defined_leverage_short,
-                        long_mode,
-                        short_mode,
-                        buffer_percentage,
-                        self.symbols_allowed,
-                        enforce_full_grid,
-                        mfirsi_signal,
-                        upnl_profit_pct,
-                        tp_order_counts,
-                        entry_during_autoreduce
-                    )
-
-
+                    try:
+                        self.bybit_1m_mfi_quickscalp_trend_noeri_maxposbal(
+                            open_orders,
+                            symbol,
+                            min_vol,
+                            one_minute_volume,
+                            mfirsi_signal,
+                            long_dynamic_amount,
+                            short_dynamic_amount,
+                            long_pos_qty,
+                            short_pos_qty,
+                            long_pos_price,
+                            short_pos_price,
+                            entry_during_autoreduce,
+                            volume_check,
+                            long_take_profit,
+                            short_take_profit,
+                            upnl_profit_pct,
+                            tp_order_counts,
+                            total_equity,
+                            max_pos_balance_pct
+                        )
+                    except Exception as e:
+                        logging.info(f"Something is up with the variables in for the strategy {e}")
+                    
                     logging.info(f"Long tp counts: {long_tp_counts}")
                     logging.info(f"Short tp counts: {short_tp_counts}")
 
@@ -726,73 +854,71 @@ class BybitQSGridNotional(BybitStrategy):
                     logging.info(f"Long TP order count for {symbol} is {tp_order_counts['long_tp_count']}")
                     logging.info(f"Short TP order count for {symbol} is {tp_order_counts['short_tp_count']}")
 
-                    self.place_long_tp_order(
-                        symbol,
-                        best_ask_price,
-                        long_pos_price,
-                        long_pos_qty,
-                        long_take_profit,
-                        open_orders
-                    )
-
-                    self.place_short_tp_order(
-                        symbol,
-                        best_bid_price,
-                        short_pos_price,
-                        short_pos_qty,
-                        short_take_profit,
-                        open_orders
-                    )
-
                     current_latest_time = datetime.now()
                     logging.info(f"Current time: {current_latest_time}")
                     logging.info(f"Next long TP update time: {self.next_long_tp_update}")
                     logging.info(f"Next short TP update time: {self.next_short_tp_update}")
 
-                    # Check for long positions
+                    # Calculate take profit for short and long positions using quickscalp method
+                    short_take_profit = self.calculate_quickscalp_short_take_profit_dynamic_distance(short_pos_price, symbol, min_upnl_profit_pct=upnl_profit_pct, max_upnl_profit_pct=max_upnl_profit_pct)
+                    long_take_profit = self.calculate_quickscalp_long_take_profit_dynamic_distance(long_pos_price, symbol, min_upnl_profit_pct=upnl_profit_pct, max_upnl_profit_pct=max_upnl_profit_pct)
+
+                    # Update TP for long position
                     if long_pos_qty > 0:
-                        if current_latest_time >= self.next_long_tp_update:
-                            self.next_long_tp_update = self.update_quickscalp_tp(
-                                symbol=symbol, 
-                                pos_qty=long_pos_qty, 
-                                upnl_profit_pct=upnl_profit_pct,  # Add the quickscalp percentage
-                                short_pos_price=short_pos_price,
+                        new_long_tp_min, new_long_tp_max = self.calculate_quickscalp_long_take_profit_dynamic_distance(
+                            long_pos_price, symbol, upnl_profit_pct, max_upnl_profit_pct
+                        )
+                        if new_long_tp_min is not None and new_long_tp_max is not None:
+                            self.next_long_tp_update = self.update_quickscalp_tp_dynamic(
+                                symbol=symbol,
+                                pos_qty=long_pos_qty,
+                                upnl_profit_pct=upnl_profit_pct,  # Minimum desired profit percentage
+                                max_upnl_profit_pct=max_upnl_profit_pct,  # Maximum desired profit percentage for scaling
+                                short_pos_price=None,  # Not relevant for long TP settings
                                 long_pos_price=long_pos_price,
-                                positionIdx=1, 
-                                order_side="sell", 
+                                positionIdx=1,
+                                order_side="sell",
                                 last_tp_update=self.next_long_tp_update,
                                 tp_order_counts=tp_order_counts,
                                 open_orders=open_orders
                             )
 
-                    # Check for short positions
                     if short_pos_qty > 0:
-                        if current_latest_time >= self.next_short_tp_update:
-                            self.next_short_tp_update = self.update_quickscalp_tp(
-                                symbol=symbol, 
-                                pos_qty=short_pos_qty, 
-                                upnl_profit_pct=upnl_profit_pct,  # Add the quickscalp percentage
+                        new_short_tp_min, new_short_tp_max = self.calculate_quickscalp_short_take_profit_dynamic_distance(
+                            short_pos_price, symbol, upnl_profit_pct, max_upnl_profit_pct
+                        )
+                        if new_short_tp_min is not None and new_short_tp_max is not None:
+                            self.next_short_tp_update = self.update_quickscalp_tp_dynamic(
+                                symbol=symbol,
+                                pos_qty=short_pos_qty,
+                                upnl_profit_pct=upnl_profit_pct,  # Minimum desired profit percentage
+                                max_upnl_profit_pct=max_upnl_profit_pct,  # Maximum desired profit percentage for scaling
                                 short_pos_price=short_pos_price,
-                                long_pos_price=long_pos_price,
-                                positionIdx=2, 
-                                order_side="buy", 
+                                long_pos_price=None,  # Not relevant for short TP settings
+                                positionIdx=2,
+                                order_side="buy",
                                 last_tp_update=self.next_short_tp_update,
                                 tp_order_counts=tp_order_counts,
                                 open_orders=open_orders
                             )
-
                     if self.test_orders_enabled and current_time - self.last_helper_order_cancel_time >= self.helper_interval:
                         if symbol in open_symbols:
                             self.helper_active = True
                             self.helperv2(symbol, short_dynamic_amount, long_dynamic_amount)
                         else:
                             logging.info(f"Skipping test orders for {symbol} as it's not in open symbols list.")
-                    
-                    # Check if the symbol should terminate
-                    if self.should_terminate_full(symbol, current_time, previous_long_pos_qty, long_pos_qty, previous_short_pos_qty, short_pos_qty):
-                        self.cleanup_before_termination(symbol)
-                        break  # Exit the while loop, thus ending the thread
-                    
+                            
+                    # # Check if the symbol should terminate
+                    # if self.should_terminate_full(symbol, current_time, previous_long_pos_qty, long_pos_qty, previous_short_pos_qty, short_pos_qty):
+                    #     self.cleanup_before_termination(symbol)
+                    #     break  # Exit the while loop, thus ending the thread
+
+                    # Check to terminate the loop if both long and short are no longer running
+                    if not self.running_long and not self.running_short:
+                        logging.info("Both long and short operations have ended. Preparing to exit loop.")
+                        shared_symbols_data.pop(symbol, None)  # Remove the symbol from shared symbols data
+                        # This will cause the loop condition to fail naturally without a break, making the code flow cleaner
+                                
                     # Check if a position has been closed
                     if previous_long_pos_qty > 0 and long_pos_qty == 0:
                         logging.info(f"Long position closed for {symbol}. Canceling long grid orders.")
@@ -805,8 +931,7 @@ class BybitQSGridNotional(BybitStrategy):
                         self.cancel_grid_orders(symbol, "sell")
                         self.cleanup_before_termination(symbol)
                         break  # Exit the while loop, thus ending the thread
-                    
-
+                
                     # self.cancel_entries_bybit(symbol, best_ask_price, moving_averages["ma_1m_3_high"], moving_averages["ma_5m_3_high"])
                     # self.cancel_stale_orders_bybit(symbol)
 
@@ -856,13 +981,13 @@ class BybitQSGridNotional(BybitStrategy):
                             logging.info("Data saved to shared_data.json")
 
                     except FileNotFoundError:
-                        logging.error(f"File not found: {dashboard_path}")
+                        logging.info(f"File not found: {dashboard_path}")
                         # Handle the absence of the file, e.g., by creating it or using default data
                     except IOError as e:
-                        logging.error(f"I/O error occurred: {e}")
+                        logging.info(f"I/O error occurred: {e}")
                         # Handle other I/O errors
                     except Exception as e:
-                        logging.error(f"An unexpected error occurred: {e}")
+                        logging.info(f"An unexpected error occurred in saving json: {e}")
                         
                 iteration_end_time = time.time()  # Record the end time of the iteration
                 iteration_duration = iteration_end_time - iteration_start_time
@@ -871,4 +996,4 @@ class BybitQSGridNotional(BybitStrategy):
                 time.sleep(3)
         except Exception as e:
             traceback_info = traceback.format_exc()  # Get the full traceback
-            logging.error(f"Exception caught in quickscalp strategy '{symbol}': {e}\nTraceback:\n{traceback_info}")
+            logging.info(f"Exception caught in quickscalp strategy '{symbol}': {e}\nTraceback:\n{traceback_info}")

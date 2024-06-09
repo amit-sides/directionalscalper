@@ -8,7 +8,7 @@
   "bot": {
     "bot_name": "your_bot_name",
     "symbol": "BTCUSDT",
-    "volume_check": true,
+    "volume_check": false,
     "min_distance": 0.15,
     "min_volume": 10000,
     "wallet_exposure_limit": 0.001,
@@ -43,17 +43,17 @@
     "dashboard_enabled": false,
     "shared_data_path": "data/",
     "linear_grid": {
-      "max_qty_percent_long": 10,
-      "max_qty_percent_short": 10,
+      "max_qty_percent_long": 5,
+      "max_qty_percent_short": 5,
       "auto_reduce_cooldown_enabled": false,
       "auto_reduce_cooldown_start_pct": 0.051,
       "wallet_exposure_limit_long": 0.001,
       "wallet_exposure_limit_short": 0.001,
-      "levels": 4,
+      "levels": 3,
       "strength": 1.4,
       "outer_price_distance": 0.059,
       "min_outer_price_distance": 0.019,
-      "max_outer_price_distance": 0.049,
+      "max_outer_price_distance": 0.039,
       "long_mode": true,
       "short_mode": true,
       "reissue_threshold": 0.001,
@@ -66,10 +66,17 @@
       "max_buffer_percentage_ar": 0.004,
       "upnl_auto_reduce_threshold_long": 10.0,
       "upnl_auto_reduce_threshold_short": 10.0,
-      "failsafe_enabled": true,
+      "failsafe_enabled": false,
       "failsafe_start_pct": 0.05,
       "long_failsafe_upnl_pct": 10.0,
       "short_failsafe_upnl_pct": 10.0
+    },
+    "hotkeys": {
+      "hotkeys_enabled": false,
+      "enter_long": "1",
+      "take_profit_long": "2",
+      "enter_short": "3",
+      "take_profit_short": "4"
     }
   },
   "exchanges": [
@@ -96,6 +103,13 @@
     },
     {
       "name": "hyperliquid",
+      "account_name": "account_1",
+      "api_key": "",
+      "api_secret": "",
+      "symbols_allowed": 5
+    },
+    {
+      "name": "blofin",
       "account_name": "account_1",
       "api_key": "",
       "api_secret": "",

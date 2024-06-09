@@ -23,6 +23,8 @@ from threading import Thread, Lock
 
 from ..bot_metrics import BotDatabase
 
+from rate_limit import RateLimit
+
 
 logging = Logger(logger_name="BaseStrategy", filename="BaseStrategy.log", stream=True)
 
@@ -96,6 +98,7 @@ class BaseStrategy:
         self.dynamic_amount_per_symbol = {}
         self.max_trade_qty_per_symbol = {}
         self.last_auto_reduce_time = {}
+        self.rate_limiter = RateLimit(10, 1)
 
         # self.bybit = self.Bybit(self)
 
@@ -1217,13 +1220,31 @@ class BaseStrategy:
         retries = 0
         while retries < max_retries:
             try:
-                return function(*args, **kwargs)
-            except Exception as e:  # Catch all exceptions
+                with self.rate_limiter:
+                    return function(*args, **kwargs)
+            except ccxt.RateLimitExceeded as e:
+                retries += 1
+                delay = min(base_delay * (2 ** retries) + random.uniform(0, 0.1 * (2 ** retries)), max_delay)
+                logging.info(f"Rate limit exceeded: {e}. Retrying in {delay:.2f} seconds...")
+                time.sleep(delay)
+            except Exception as e:
                 retries += 1
                 delay = min(base_delay * (2 ** retries) + random.uniform(0, 0.1 * (2 ** retries)), max_delay)
                 logging.info(f"Error occurred: {e}. Retrying in {delay:.2f} seconds...")
                 time.sleep(delay)
         raise Exception(f"Failed to execute the API function after {max_retries} retries.")
+
+    # def retry_api_call(self, function, *args, max_retries=100, base_delay=10, max_delay=60, **kwargs):
+    #     retries = 0
+    #     while retries < max_retries:
+    #         try:
+    #             return function(*args, **kwargs)
+    #         except Exception as e:  # Catch all exceptions
+    #             retries += 1
+    #             delay = min(base_delay * (2 ** retries) + random.uniform(0, 0.1 * (2 ** retries)), max_delay)
+    #             logging.info(f"Error occurred: {e}. Retrying in {delay:.2f} seconds...")
+    #             time.sleep(delay)
+    #     raise Exception(f"Failed to execute the API function after {max_retries} retries.")
 
     def can_trade_new_symbol(self, open_symbols: list, symbols_allowed: int, current_symbol: str) -> bool:
         """
@@ -1488,6 +1509,45 @@ class BaseStrategy:
 
             # Deactivate helper for the next cycle
             self.helper_active = False
+
+    def pm(self, symbol):
+        # Fetch orderbook
+        orderbook = self.exchange.get_orderbook(symbol)
+        best_bid_price = Decimal(orderbook['bids'][0][0])
+        best_ask_price = Decimal(orderbook['asks'][0][0])
+
+        # Calculate target price movement
+        target_price_increase = best_ask_price * Decimal('0.005')  # Target 0.5% price increase
+        target_price = best_ask_price + target_price_increase
+
+        # Initialize variables
+        paint_orders = []
+
+        # Start painting the market
+        start_time = time.time()
+        while time.time() - start_time < self.paint_duration:
+            # Place buy orders to push the price up
+            buy_price = best_ask_price + Decimal('0.001')  # Slightly above the best ask price
+            buy_price = buy_price.quantize(Decimal('0.0000'), rounding=ROUND_HALF_UP)
+            buy_order = self.exchange.create_market_order(symbol, "buy", self.trade_amount)
+            paint_orders.append(buy_order)
+
+            # Update best ask price
+            orderbook = self.exchange.get_orderbook(symbol)
+            best_ask_price = Decimal(orderbook['asks'][0][0])
+
+            # Check if the target price has been reached
+            if best_ask_price >= target_price:
+                break
+
+            # Short sleep to simulate real market activity
+            time.sleep(1)
+
+        # Log the painting activity
+        logging.info(f"Market painting for {symbol} complete. Target price reached: {best_ask_price}")
+
+        # Deactivate painter for the next cycle
+        self.paint_active = False
 
     def calculate_qfl_levels(self, symbol: str, timeframe='5m', lookback_period=12):
         # Fetch historical candle data

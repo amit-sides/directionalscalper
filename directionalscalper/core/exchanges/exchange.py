@@ -91,6 +91,13 @@ class Exchange:
         if self.exchange_id.lower() == 'huobi' and self.market_type == 'swap':
             exchange_params['options']['defaultSubType'] = 'linear'
 
+        # Additional condition for Blofin
+        if self.exchange_id.lower() == 'blofin':
+            exchange_params['options'] = {
+                'defaultType': self.market_type,
+                'adjustForTimeDifference': True,
+            }
+            
         # Initializing the exchange object
         self.exchange = exchange_class(exchange_params)
         
@@ -373,8 +380,16 @@ class Exchange:
         except Exception as e:
             logging.info(f"An unknown error occurred in get_balance(): {e}")
         return values
-    
-    # Universal
+
+    def is_valid_symbol(self, symbol: str) -> bool:
+        try:
+            markets = self.exchange.load_markets()
+            return symbol in markets
+        except Exception as e:
+            logging.error(f"Error checking symbol validity: {e}")
+            logging.error(traceback.format_exc())
+            return False
+        
     def fetch_ohlcv(self, symbol, timeframe='1d', limit=None):
         """
         Fetch OHLCV data for the given symbol and timeframe.
