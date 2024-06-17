@@ -1364,73 +1364,7 @@ class BaseStrategy:
                     position_details[symbol]['short']['avg_price'] = avg_price
 
         return position_details
-
-    def helperv3(self, symbol, dynamic_amount, direction):
-        if self.helper_active:
-            # Fetch orderbook and positions
-            orderbook = self.exchange.get_orderbook(symbol)
-            best_bid_price = Decimal(orderbook['bids'][0][0])
-            best_ask_price = Decimal(orderbook['asks'][0][0])
-
-            # Adjust helper_wall_size
-            base_helper_wall_size = self.helper_wall_size
-            adjusted_helper_wall_size = base_helper_wall_size + 5
-
-            # Initialize variables
-            helper_orders = []
-
-            # Dynamic safety_margin and base_gap based on asset's price
-            safety_margin = best_ask_price * Decimal('0.0060')  # 0.60% of current price
-            base_gap = best_ask_price * Decimal('0.0060')  # 0.60% of current price
-
-            for i in range(adjusted_helper_wall_size):
-                gap = base_gap + Decimal(i) * Decimal('0.002')  # Increasing gap for each subsequent order
-                unique_id = int(time.time() * 1000) + i  # Generate a unique identifier
-
-                if direction == "long":
-                    # Calculate long helper price based on best ask price
-                    helper_price = best_ask_price + gap + safety_margin
-                    helper_price = helper_price.quantize(Decimal('0.0000'), rounding=ROUND_HALF_UP)
-                    helper_order = self.exchange.create_tagged_limit_order_bybit(
-                        symbol,
-                        "sell",
-                        dynamic_amount * 1.5,
-                        helper_price,
-                        positionIdx=2,
-                        postOnly=True,
-                        params={"orderLinkId": f"helperOrder_{symbol}_long_{unique_id}"}
-                    )
-                    helper_orders.append(helper_order)
-
-                elif direction == "short":
-                    # Calculate short helper price based on best bid price
-                    helper_price = best_bid_price - gap - safety_margin
-                    helper_price = helper_price.quantize(Decimal('0.0000'), rounding=ROUND_HALF_UP)
-                    helper_order = self.exchange.create_tagged_limit_order_bybit(
-                        symbol,
-                        "buy",
-                        dynamic_amount * 1.5,
-                        helper_price,
-                        positionIdx=1,
-                        postOnly=True,
-                        params={"orderLinkId": f"helperOrder_{symbol}_short_{unique_id}"}
-                    )
-                    helper_orders.append(helper_order)
-
-            # Sleep for the helper duration and then cancel all placed orders
-            time.sleep(self.helper_duration)
-
-            # Cancel orders and handle errors
-            for order in helper_orders:
-                if 'id' in order:
-                    logging.info(f"Helper order for {symbol}: {order}")
-                    self.exchange.cancel_order_by_id(order['id'], symbol)
-                else:
-                    logging.warning(f"Could not place helper order for {symbol}: {order.get('error', 'Unknown error')}")
-
-            # Deactivate helper for the next cycle
-            self.helper_active = False
-            
+    
     def helperv2(self, symbol, short_dynamic_amount, long_dynamic_amount):
         if self.helper_active:
             # Fetch orderbook and positions
@@ -2720,6 +2654,100 @@ class BaseStrategy:
         volatility_metric = atr / df['close'].iloc[-1]  # Example: normalized by the latest closing price
 
         return volatility_metric
+
+    def lorentzian_distance(self, x1, x2):
+        try:
+            """
+            Calculate the Lorentzian distance between two points.
+            """
+            return np.sum(np.log(1 + np.abs(x1 - x2)))
+        except Exception as e:
+            logging.info(f"Exception caught in lorentzian_distance {e}")
+
+    def get_lorentzian_distance(self, feature_series, feature_arrays, feature_count, index):
+        try:
+            """
+            Calculate the Lorentzian distance for the specified index and feature count.
+            """
+            distances = [
+                self.lorentzian_distance(feature_series[f'f{i+1}'], feature_arrays[f'f{i+1}'][index])
+                for i in range(feature_count)
+            ]
+            return sum(distances)
+        except Exception as e:
+            logging.info(f"Exception caught in get_lorentzian_distance {e}")
+
+    def calculate_features(self, df, feature_params):
+        try:
+            """
+            Calculate the required features for machine learning.
+            """
+            features = {}
+            features['RSI'] = ta.momentum.RSIIndicator(df['close'], window=feature_params['RSI']).rsi()
+            features['ADX'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=feature_params['ADX']).adx()
+            features['CCI'] = ta.trend.CCIIndicator(df['high'], df['low'], df['close'], window=feature_params['CCI']).cci()
+            features['WT'] = ta.momentum.WilliamsRIndicator(df['high'], df['low'], df['close'], lbp=feature_params['WT']).williams_r()
+            
+            feature_series = {f'f{i+1}': features[feature] for i, feature in enumerate(features.keys())}
+            feature_arrays = {f'f{i+1}': features[feature].values for i, feature in enumerate(features.keys())}
+            
+            return feature_series, feature_arrays
+        except Exception as e:
+            logging.info(f"Exception caught in calculate_features {e}")
+
+    def find_nearest_neighbors(self, df, feature_series, feature_arrays, feature_count, neighbors_count, max_bars_back):
+        """
+        Find the nearest neighbors using Lorentzian distance.
+        """
+        predictions = []
+        distances = []
+        last_distance = -1
+        size = min(max_bars_back - 1, len(df) - 1)
+
+        for i in range(size):
+            distance = self.get_lorentzian_distance(feature_series, feature_arrays, feature_count, i)
+            if distance >= last_distance and i % 4 == 0:
+                last_distance = distance
+                distances.append(distance)
+                predictions.append(df['close'].iloc[i])
+                if len(predictions) > neighbors_count:
+                    last_distance = np.percentile(distances, 25)
+                    distances.pop(0)
+                    predictions.pop(0)
+
+        prediction = np.mean(predictions)
+        return prediction
+    
+    def get_lorentzian_prediction(self, symbol: str, limit: int = 240, lookback: int = 1, neighbors_count: int = 8, max_bars_back: int = 2000) -> str:
+        try:
+            """
+            Generate a trading signal based on Lorentzian distance prediction.
+            """
+            # Fetch OHLCV data
+            ohlcv_data = self.exchange.fetch_ohlcv(symbol=symbol, timeframe='1m', limit=limit)
+            df = pd.DataFrame(ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+            # Calculate Features
+            feature_params = {
+                'RSI': 14,
+                'ADX': 14,
+                'CCI': 20,
+                'WT': 14
+            }
+            feature_series, feature_arrays = self.calculate_features(df, feature_params)
+
+            # Get Lorentzian Prediction
+            lorentzian_prediction = self.find_nearest_neighbors(df, feature_series, feature_arrays, len(feature_params), neighbors_count, max_bars_back)
+            
+            # Define thresholds for trading signals
+            if lorentzian_prediction > df['close'].iloc[-1] * 1.01:  # Example threshold: 1% higher than the current close price
+                return 'long'
+            elif lorentzian_prediction < df['close'].iloc[-1] * 0.99:  # Example threshold: 1% lower than the current close price
+                return 'short'
+            else:
+                return 'neutral'
+        except Exception as e:
+            logging.info(f"Exception caught in lorentzian prediction {e}")
 
     def liq_stop_loss_logic(self, long_pos_qty, long_pos_price, long_liquidation_price, short_pos_qty, short_pos_price, short_liquidation_price, liq_stoploss_enabled, symbol, liq_price_stop_pct):
         if liq_stoploss_enabled:
