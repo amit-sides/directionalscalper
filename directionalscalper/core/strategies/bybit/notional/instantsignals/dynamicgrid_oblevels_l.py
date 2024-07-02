@@ -12,11 +12,11 @@ from directionalscalper.core.strategies.bybit.bybit_strategy import BybitStrateg
 from directionalscalper.core.exchanges.bybit import BybitExchange
 from directionalscalper.core.strategies.logger import Logger
 from live_table_manager import shared_symbols_data
-logging = Logger(logger_name="BybitQuickScalpTrendDynamicTP", filename="BybitQuickScalpTrendDynamicTP.log", stream=True)
+logging = Logger(logger_name="BybitDynamicGridSpanOBLevelsLSignal", filename="BybitDynamicGridSpanOBLevelsLSignal.log", stream=True)
 
 symbol_locks = {}
 
-class BybitQuickScalpTrendDynamicTP(BybitStrategy):
+class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
     def __init__(self, exchange, manager, config, symbols_allowed=None, rotator_symbols_standardized=None, mfirsi_signal=None):
         super().__init__(exchange, config, manager, symbols_allowed)
         self.mfirsi_signal = mfirsi_signal
@@ -455,7 +455,19 @@ class BybitQuickScalpTrendDynamicTP(BybitStrategy):
                 logging.info(f"Current long pos qty for {symbol} {long_pos_qty}")
                 logging.info(f"Current short pos qty for {symbol} {short_pos_qty}")
 
-                # Check if a position has been closed
+                # # Check if a position has been closed
+                # if previous_long_pos_qty > 0 and long_pos_qty == 0:
+                #     logging.info(f"Long position closed for {symbol}. Canceling long grid orders.")
+                #     self.cancel_grid_orders(symbol, "buy")
+                #     #self.cleanup_before_termination(symbol)
+                #     break  # Exit the while loop, thus ending the thread
+
+                # if previous_short_pos_qty > 0 and short_pos_qty == 0:
+                #     logging.info(f"Short position closed for {symbol}. Canceling short grid orders.")
+                #     self.cancel_grid_orders(symbol, "sell")
+                #     #self.cleanup_before_termination(symbol)
+                #     break  # Exit the while loop, thus ending the thread
+            
                 if previous_long_pos_qty > 0 and long_pos_qty == 0:
                     logging.info(f"Long position closed for {symbol}. Canceling long grid orders.")
                     self.cancel_grid_orders(symbol, "buy")
@@ -472,13 +484,18 @@ class BybitQuickScalpTrendDynamicTP(BybitStrategy):
                         shared_symbols_data.pop(symbol, None)
                     break  # Exit the while loop, thus ending the thread
 
-                # Check for position inactivity
-                inactive_pos_time_threshold = 180  # 3 minutes in seconds
-                if self.check_position_inactivity(symbol, inactive_pos_time_threshold, long_pos_qty, short_pos_qty, previous_long_pos_qty, previous_short_pos_qty):
-                    logging.info(f"No open positions for {symbol} in the last {inactive_pos_time_threshold} seconds. Terminating the thread.")
-                    shared_symbols_data.pop(symbol, None)
-                    break
-                    
+
+                try:
+                    logging.info(f"Checking position inactivity")
+                    # Check for position inactivity
+                    inactive_pos_time_threshold = 60 
+                    if self.check_position_inactivity(symbol, inactive_pos_time_threshold, long_pos_qty, short_pos_qty, previous_long_pos_qty, previous_short_pos_qty):
+                        logging.info(f"No open positions for {symbol} in the last {inactive_pos_time_threshold} seconds. Terminating the thread.")
+                        shared_symbols_data.pop(symbol, None)
+                        break
+                except Exception as e:
+                    logging.info(f"Exception caught in check_position_inactivity {e}")
+       
                 # Optionally, break out of the loop if all trading sides are closed
                 if not self.running_long and not self.running_short:
                     shared_symbols_data.pop(symbol, None)
@@ -554,6 +571,8 @@ class BybitQuickScalpTrendDynamicTP(BybitStrategy):
                 if not self.running_long and not self.running_short:
                     logging.info("Both long and short operations have ended. Preparing to exit loop.")
                     shared_symbols_data.pop(symbol, None)  # Remove the symbol from shared_symbols_data
+
+                time.sleep(2)
 
                 # If the symbol is in rotator_symbols and either it's already being traded or trading is allowed.
                 if symbol in rotator_symbols_standardized or (symbol in open_symbols or trading_allowed): # and instead of or
@@ -833,30 +852,43 @@ class BybitQuickScalpTrendDynamicTP(BybitStrategy):
                     short_tp_counts = tp_order_counts['short_tp_count']
 
                     try:
-                        self.bybit_1m_mfi_quickscalp_trend_noeri_maxposbal(
-                            open_orders,
+                        self.linear_grid_hardened_gridspan_ob_volumelevels_dynamictp_lsignal(
                             symbol,
-                            min_vol,
-                            one_minute_volume,
-                            mfirsi_signal,
-                            long_dynamic_amount,
-                            short_dynamic_amount,
-                            long_pos_qty,
-                            short_pos_qty,
+                            open_symbols,
+                            total_equity,
                             long_pos_price,
                             short_pos_price,
-                            entry_during_autoreduce,
-                            volume_check,
-                            long_take_profit,
-                            short_take_profit,
+                            long_pos_qty,
+                            short_pos_qty,
+                            levels,
+                            strength,
+                            outer_price_distance,
+                            min_outer_price_distance,
+                            max_outer_price_distance,
+                            reissue_threshold,
+                            self.wallet_exposure_limit,
+                            wallet_exposure_limit_long,
+                            wallet_exposure_limit_short,
+                            self.user_defined_leverage_long,
+                            self.user_defined_leverage_short,
+                            long_mode,
+                            short_mode,
+                            initial_entry_buffer_pct,
+                            min_buffer_percentage,
+                            max_buffer_percentage,
+                            self.symbols_allowed,
+                            enforce_full_grid,
+                            mfirsi_signal,
                             upnl_profit_pct,
+                            max_upnl_profit_pct,
                             tp_order_counts,
-                            total_equity,
-                            max_pos_balance_pct
+                            entry_during_autoreduce,
+                            max_qty_percent_long,
+                            max_qty_percent_short
                         )
                     except Exception as e:
-                        logging.info(f"Something is up with the variables in for the strategy {e}")
-                    
+                        logging.info(f"Something is up with variables for the grid {e}")
+
 
                     logging.info(f"Long tp counts: {long_tp_counts}")
                     logging.info(f"Short tp counts: {short_tp_counts}")
@@ -936,25 +968,14 @@ class BybitQuickScalpTrendDynamicTP(BybitStrategy):
                         logging.info("Both long and short operations have ended. Preparing to exit loop.")
                         shared_symbols_data.pop(symbol, None)  # Remove the symbol from shared symbols data
                         # This will cause the loop condition to fail naturally without a break, making the code flow cleaner
-                                
-                    # Check if a position has been closed
-                    if previous_long_pos_qty > 0 and long_pos_qty == 0:
-                        logging.info(f"Long position closed for {symbol}. Canceling long grid orders.")
-                        self.cancel_grid_orders(symbol, "buy")
-                        self.cleanup_before_termination(symbol)
-                        break  # Exit the while loop, thus ending the thread
-
-                    if previous_short_pos_qty > 0 and short_pos_qty == 0:
-                        logging.info(f"Short position closed for {symbol}. Canceling short grid orders.")
-                        self.cancel_grid_orders(symbol, "sell")
-                        self.cleanup_before_termination(symbol)
-                        break  # Exit the while loop, thus ending the thread
                 
                     # self.cancel_entries_bybit(symbol, best_ask_price, moving_averages["ma_1m_3_high"], moving_averages["ma_5m_3_high"])
                     # self.cancel_stale_orders_bybit(symbol)
                     
                 time.sleep(5)
 
+                dashboard_path = os.path.join(self.config.shared_data_path, "shared_data.json")
+                
                 symbol_data = {
                     'symbol': symbol,
                     'min_qty': min_qty,
@@ -976,6 +997,15 @@ class BybitQuickScalpTrendDynamicTP(BybitStrategy):
                 }
 
                 shared_symbols_data[symbol] = symbol_data
+
+                if self.config.dashboard_enabled:
+                    try:
+                        data_to_save = copy.deepcopy(shared_symbols_data)
+                        with open(dashboard_path, "w") as f:
+                            json.dump(data_to_save, f)
+                        self.update_shared_data(symbol_data, open_position_data, len(open_symbols))
+                    except Exception as e:
+                        logging.info(f"Dashboard saving is not working properly {e}")
 
                 if self.config.dashboard_enabled:
                     try:
