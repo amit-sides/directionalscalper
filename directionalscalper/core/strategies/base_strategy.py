@@ -1,4 +1,5 @@
 from colorama import Fore
+from sklearn.cluster import DBSCAN
 from typing import Optional, Tuple, List, Dict, Union
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_HALF_DOWN, ROUND_DOWN
 import pandas as pd
@@ -29,6 +30,75 @@ from rate_limit import RateLimit
 
 logging = Logger(logger_name="BaseStrategy", filename="BaseStrategy.log", stream=True)
 
+class OrderBookAnalyzer:
+    def __init__(self, exchange, symbol):
+        self.exchange = exchange
+        self.symbol = symbol
+
+    def get_order_book(self):
+        try:
+            order_book = self.exchange.fetch_order_book(self.symbol)
+            return order_book
+        except Exception as e:
+            logging.error(f"Error fetching order book for {self.symbol}: {e}")
+            return None
+
+    def get_best_prices(self):
+        order_book = self.get_order_book()
+        if order_book:
+            best_bid_price = order_book['bids'][0][0] if order_book['bids'] else None
+            best_ask_price = order_book['asks'][0][0] if order_book['asks'] else None
+            return best_bid_price, best_ask_price
+        return None, None
+
+    def calculate_average_prices(self, top_n=5):
+        order_book = self.get_order_book()
+        if order_book:
+            top_asks = order_book['asks'][:top_n]
+            top_bids = order_book['bids'][:top_n]
+            avg_top_asks = sum([ask[0] for ask in top_asks]) / len(top_asks) if top_asks else None
+            avg_top_bids = sum([bid[0] for bid in top_bids]) / len(top_bids) if top_bids else None
+            return avg_top_asks, avg_top_bids
+        return None, None
+
+    def identify_walls(self, order_book, side, threshold=0.5):
+        """ Identify buy or sell walls based on a volume threshold """
+        walls = []
+        if side == "buy":
+            orders = order_book['bids']
+        elif side == "sell":
+            orders = order_book['asks']
+        else:
+            logging.error("Invalid side specified for identifying walls. Choose 'buy' or 'sell'.")
+            return walls
+
+        total_volume = sum([order[1] for order in orders])
+        cumulative_volume = 0
+
+        for order in orders:
+            price, volume = order
+            cumulative_volume += volume
+            if cumulative_volume / total_volume >= threshold:
+                walls.append(price)
+                break
+
+        return walls
+
+    def get_order_book_imbalance(self):
+        order_book = self.get_order_book()
+        if not order_book:
+            return None
+
+        total_bids = sum([bid[1] for bid in order_book['bids']])
+        total_asks = sum([ask[1] for ask in order_book['asks']])
+
+        if total_bids > total_asks * 1.5:
+            return "buy_wall"
+        elif total_asks > total_bids * 1.5:
+            return "sell_wall"
+        else:
+            return "neutral"
+        
 class BaseStrategy:
     initialized_symbols = set()
     initialized_symbols_lock = threading.Lock()
@@ -37,7 +107,7 @@ class BaseStrategy:
         self.exchange = exchange
         self.config = config
         self.manager = manager
-        self.symbol = config.symbol
+        # self.symbol = config.symbol
         self.symbols_allowed = symbols_allowed
         self.order_timestamps = {}
         self.entry_order_ids = {}
@@ -78,9 +148,6 @@ class BaseStrategy:
         self.auto_reduce_start_pct = self.config.auto_reduce_start_pct
         self.auto_reduce_maxloss_pct = self.config.auto_reduce_maxloss_pct
         self.max_pos_balance_pct = self.config.max_pos_balance_pct
-        self.wallet_exposure_limit = self.config.wallet_exposure_limit
-        self.user_defined_leverage_long = self.config.user_defined_leverage_long
-        self.user_defined_leverage_short = self.config.user_defined_leverage_short
         self.last_entries_cancel_time = 0
         self.MIN_RISK_LEVEL = 0.001
         self.MAX_RISK_LEVEL = 10
@@ -89,7 +156,6 @@ class BaseStrategy:
         self.auto_reduce_orders = {}
         self.auto_reduce_order_ids = {}
         self.previous_levels = {}
-        self.auto_leverage_upscale = self.config.auto_leverage_upscale
         self.max_long_trade_qty_per_symbol = {}
         self.max_short_trade_qty_per_symbol = {}
         self.initial_max_long_trade_qty_per_symbol = {}
@@ -100,8 +166,177 @@ class BaseStrategy:
         self.max_trade_qty_per_symbol = {}
         self.last_auto_reduce_time = {}
         self.rate_limiter = RateLimit(10, 1)
+        self.general_rate_limiter = RateLimit(50, 1)
+        self.order_rate_limiter = RateLimit(5, 1) 
+        self.last_known_mas = {}
 
         # self.bybit = self.Bybit(self)
+
+    def dbscan_classification(self, ohlcv_data, zigzag_length, epsilon_deviation, aggregate_range):
+        logging.info(f"Starting dbscan_classification with zigzag_length={zigzag_length}, epsilon_deviation={epsilon_deviation}, aggregate_range={aggregate_range}")
+
+        # Extract highs and lows from the OHLCV data
+        highs = np.array([candle['high'] for candle in ohlcv_data])
+        lows = np.array([candle['low'] for candle in ohlcv_data])
+        logging.info(f"Extracted highs: {highs}, lows: {lows}")
+
+        peaks_and_troughs = []
+
+        direction_up = False
+        last_low = np.max(highs) * 100
+        last_high = 0.0
+
+        # Detect peaks and troughs
+        for i in range(zigzag_length, len(ohlcv_data) - zigzag_length):
+            h = np.max(highs[i - zigzag_length:i + zigzag_length + 1])
+            l = np.min(lows[i - zigzag_length:i + zigzag_length + 1])
+            logging.info(f"Evaluating at index {i}: high={h}, low={l}, direction_up={direction_up}")
+
+            # Try a smaller zigzag_length
+            zigzag_length = max(1, zigzag_length // 2)
+
+            # Or adjust conditions in the loop
+            if direction_up:
+                if l < last_low:  # Less strict than 'l == ohlcv_data[i]['low']'
+                    last_low = l
+                    peaks_and_troughs.append(last_low)
+                if h > last_high:  # Less strict than 'h == ohlcv_data[i]['high']'
+                    last_high = h
+                    direction_up = False
+                    peaks_and_troughs.append(last_high)
+            else:
+                if h > last_high:
+                    last_high = h
+                    peaks_and_troughs.append(last_high)
+                if l < last_low:
+                    last_low = l
+                    direction_up = True
+                    peaks_and_troughs.append(last_low)
+
+        # Convert peaks_and_troughs to a numpy array
+        zigzag = np.array(peaks_and_troughs)
+        logging.info(f"Generated zigzag array: {zigzag}")
+
+        # Check if zigzag array is empty
+        if zigzag.size == 0:
+            logging.info("Zigzag array is empty. No peaks or troughs detected.")
+            return []
+
+        # Normalize the peaks and troughs
+        min_price = np.min(zigzag)
+        max_price = np.max(zigzag)
+        logging.info(f"Zigzag min_price: {min_price}, max_price: {max_price}")
+
+        normalized_zigzag = (zigzag - min_price) / (max_price - min_price)
+        logging.info(f"Normalized zigzag array: {normalized_zigzag}")
+
+        # Calculate the mean deviation
+        mean = np.mean(normalized_zigzag)
+        deviation = np.mean(np.abs(normalized_zigzag - mean))
+        logging.info(f"Calculated mean: {mean}, deviation: {deviation}")
+
+        # Define the epsilon value for DBSCAN
+        epsilon = (deviation * epsilon_deviation) / 100.0
+        logging.info(f"Calculated epsilon for DBSCAN: {epsilon}")
+
+        # Prepare data points for DBSCAN
+        data_points = normalized_zigzag.reshape(-1, 1)
+        logging.info(f"Data points prepared for DBSCAN: {data_points}")
+
+        # Run DBSCAN clustering
+        dbscan = DBSCAN(eps=epsilon, min_samples=1, metric='euclidean')
+        dbscan.fit(data_points)
+        logging.info(f"DBSCAN labels: {dbscan.labels_}")
+
+        # Extract clusters and noise
+        clusters = []
+        for label in set(dbscan.labels_):
+            if label != -1:  # -1 means noise
+                cluster = [i for i, l in enumerate(dbscan.labels_) if l == label]
+                clusters.append(cluster)
+                logging.info(f"Detected cluster with label {label}: {cluster}")
+
+        noise = [i for i, l in enumerate(dbscan.labels_) if l == -1]
+        logging.info(f"Detected noise points: {noise}")
+
+        # Aggregate and filter clusters into significant levels
+        support_resistance_levels = []
+        for cluster in clusters:
+            cluster_prices = zigzag[cluster]
+            cluster_volumes = [ohlcv_data[i]['volume'] for i in cluster]
+            median_price = np.median(cluster_prices)
+            average_volume = np.mean(cluster_volumes)
+            strength = len(cluster_prices)
+            support_resistance_levels.append({
+                'level': median_price,
+                'strength': strength,
+                'average_volume': average_volume
+            })
+            logging.info(f"Added support/resistance level: {median_price}, strength: {strength}, average volume: {average_volume}")
+
+        # Add significant noise levels
+        max_level = np.max([level['level'] for level in support_resistance_levels])
+        min_level = np.min([level['level'] for level in support_resistance_levels])
+
+        for i in noise:
+            noise_level = zigzag[i]
+            noise_volume = ohlcv_data[i]['volume']
+            if noise_level > max_level and (noise_level - max_level) / max_level > aggregate_range / 100.0:
+                support_resistance_levels.append({
+                    'level': noise_level,
+                    'strength': 1,
+                    'average_volume': noise_volume
+                })
+                logging.info(f"Added significant noise level above max level: {noise_level}")
+            elif noise_level < min_level and (min_level - noise_level) / min_level > aggregate_range / 100.0:
+                support_resistance_levels.append({
+                    'level': noise_level,
+                    'strength': 1,
+                    'average_volume': noise_volume
+                })
+                logging.info(f"Added significant noise level below min level: {noise_level}")
+
+        # Sort the levels by price level in descending order
+        support_resistance_levels.sort(key=lambda x: x['level'], reverse=True)
+        logging.info(f"Sorted support/resistance levels: {support_resistance_levels}")
+
+        # Filter out closely grouped levels
+        filtered_levels = []
+        i = 0
+        while i < len(support_resistance_levels):
+            current_group = [support_resistance_levels[i]]
+            j = i + 1
+
+            while j < len(support_resistance_levels) and \
+                    abs(support_resistance_levels[j]['level'] - support_resistance_levels[i]['level']) / support_resistance_levels[i]['level'] <= aggregate_range / 100.0:
+                current_group.append(support_resistance_levels[j])
+                j += 1
+
+            current_group.sort(key=lambda x: x['average_volume'], reverse=True)
+            filtered_levels.append(current_group[0])
+            i = j
+            logging.info(f"Filtered level added: {current_group[0]}")
+
+        # Finalize the levels by removing close duplicates
+        final_levels = []
+        for k in range(len(filtered_levels)):
+            if len(final_levels) == 0 or \
+                    abs(filtered_levels[k]['level'] - final_levels[-1]['level']) / final_levels[-1]['level'] > aggregate_range / 100.0:
+                final_levels.append(filtered_levels[k])
+                logging.info(f"Final level added: {filtered_levels[k]}")
+            else:
+                for m in range(k + 1, len(filtered_levels)):
+                    if abs(filtered_levels[m]['level'] - final_levels[-1]['level']) / final_levels[-1]['level'] > aggregate_range / 100.0:
+                        final_levels.append(filtered_levels[m])
+                        k = m
+                        logging.info(f"Final level added after checking close duplicates: {filtered_levels[m]}")
+                        break
+
+        # Sort final levels in descending order
+        final_levels.sort(key=lambda x: x['level'], reverse=True)
+        logging.info(f"Final sorted levels: {final_levels}")
+
+        return final_levels
 
     def update_hedged_status(self, symbol, is_hedged):
         self.hedged_positions[symbol] = is_hedged
@@ -238,28 +473,34 @@ class BaseStrategy:
         ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        # Convert columns to numeric
+        df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].apply(pd.to_numeric, errors='coerce')
+
+        # Validate data
+        if df[['open', 'high', 'low', 'close', 'volume']].isnull().any().any():
+            logging.warning(f"Invalid data detected for {symbol} on timeframe {timeframe}. Data:\n{df}")
+            # Handle invalid data here (e.g., skip the symbol, raise an error, etc.)
+
         return df
 
     def calculate_atr(self, df, period=14):
+        # Drop rows with NaN values in 'high', 'low', or 'close' columns
+        df = df.dropna(subset=['high', 'low', 'close'])
+
+        # Check again if there are enough data points after dropping NaNs
+        if len(df) < period:
+            return None  # Not enough data points
+
         high_low = df['high'] - df['low']
         high_close = np.abs(df['high'] - df['close'].shift())
         low_close = np.abs(df['low'] - df['close'].shift())
         tr = np.max([high_low, high_close, low_close], axis=0)
-        
-        if len(tr) < period:
-            return None  # Return None if there are not enough data points
-        
-        atr = np.nanmean(tr[-period:])  # Use np.nanmean to handle NaNs
+
+        # Calculate the ATR using np.nanmean to ignore any remaining NaNs
+        atr = np.nanmean(tr[-period:])
+
         return atr if not np.isnan(atr) else None  # Return None if the result is NaN
-
-    # def calculate_atr(self, df, period=14):
-    #     high_low = df['high'] - df['low']
-    #     high_close = np.abs(df['high'] - df['close'].shift())
-    #     low_close = np.abs(df['low'] - df['close'].shift())
-    #     tr = np.max([high_low, high_close, low_close], axis=0)
-    #     atr = np.mean(tr[-period:])
-    #     return atr
-
 
     def initialize_trade_quantities(self, symbol, total_equity, best_ask_price, max_leverage):
         if symbol in self.initialized_symbols:
@@ -278,32 +519,46 @@ class BaseStrategy:
         self.initialized_symbols.add(symbol)
 
     def get_all_moving_averages(self, symbol, max_retries=3, delay=5):
-        for _ in range(max_retries):
-            m_moving_averages = self.manager.get_1m_moving_averages(symbol)
-            m5_moving_averages = self.manager.get_5m_moving_averages(symbol)
+        with self.general_rate_limiter:
+            for _ in range(max_retries):
+                try:
+                    m_moving_averages = self.manager.get_1m_moving_averages(symbol)
+                    m5_moving_averages = self.manager.get_5m_moving_averages(symbol)
 
-            ma_6_high = m_moving_averages["MA_6_H"]
-            ma_6_low = m_moving_averages["MA_6_L"]
-            ma_3_low = m_moving_averages["MA_3_L"]
-            ma_3_high = m_moving_averages["MA_3_H"]
-            ma_1m_3_high = self.manager.get_1m_moving_averages(symbol)["MA_3_H"]
-            ma_5m_3_high = self.manager.get_5m_moving_averages(symbol)["MA_3_H"]
+                    ma_6_high = m_moving_averages.get("MA_6_H")
+                    ma_6_low = m_moving_averages.get("MA_6_L")
+                    ma_3_low = m_moving_averages.get("MA_3_L")
+                    ma_3_high = m_moving_averages.get("MA_3_H")
+                    ma_1m_3_high = m_moving_averages.get("MA_3_H")
+                    ma_5m_3_high = m5_moving_averages.get("MA_3_H")
 
-            # Check if the data is correct
-            if all(isinstance(value, (float, int, np.number)) for value in [ma_6_high, ma_6_low, ma_3_low, ma_3_high, ma_1m_3_high, ma_5m_3_high]):
-                return {
-                    "ma_6_high": ma_6_high,
-                    "ma_6_low": ma_6_low,
-                    "ma_3_low": ma_3_low,
-                    "ma_3_high": ma_3_high,
-                    "ma_1m_3_high": ma_1m_3_high,
-                    "ma_5m_3_high": ma_5m_3_high,
-                }
+                    # Check if the data is correct
+                    if all(isinstance(value, (float, int, np.number)) for value in [ma_6_high, ma_6_low, ma_3_low, ma_3_high, ma_1m_3_high, ma_5m_3_high]):
+                        self.last_known_mas[symbol] = {
+                            "ma_6_high": ma_6_high,
+                            "ma_6_low": ma_6_low,
+                            "ma_3_low": ma_3_low,
+                            "ma_3_high": ma_3_high,
+                            "ma_1m_3_high": ma_1m_3_high,
+                            "ma_5m_3_high": ma_5m_3_high,
+                        }
+                        return self.last_known_mas[symbol]
 
-            # If the data is not correct, wait for a short delay
-            time.sleep(delay)
+                    logging.warning(f"Invalid moving averages for {symbol}: {m_moving_averages}, {m5_moving_averages}. Retrying...")
 
-        raise ValueError("Failed to fetch valid moving averages after multiple attempts.")
+                except Exception as e:
+                    logging.error(f"Error fetching moving averages for {symbol}: {e}. Retrying...")
+
+                # If the data is not correct, wait for a short delay
+                time.sleep(delay)
+
+            # If retries are exhausted, use the last known values
+            if symbol in self.last_known_mas:
+                logging.info(f"Using last known moving averages for {symbol}.")
+                return self.last_known_mas[symbol]
+            else:
+                raise ValueError(f"Failed to fetch valid moving averages for {symbol} after multiple attempts and no fallback available.")
+
 
     def get_current_price(self, symbol):
         return self.exchange.get_current_price(symbol)
@@ -568,11 +823,11 @@ class BaseStrategy:
 
         raise Exception("Failed to calculate maximum trade quantity after maximum retries.")
 
-    def calc_max_trade_qty_multi(self, total_equity, best_ask_price, max_leverage, max_retries=5, retry_delay=5):
+    def calc_max_trade_qty_multi(self, symbol, total_equity, best_ask_price, max_leverage, max_retries=5, retry_delay=5):
         wallet_exposure = self.config.wallet_exposure
         for i in range(max_retries):
             try:
-                market_data = self.exchange.get_market_data_bybit(self.symbol)
+                market_data = self.exchange.get_market_data_bybit(symbol)
                 max_trade_qty = round(
                     (float(total_equity) * wallet_exposure / float(best_ask_price))
                     / (100 / max_leverage),
@@ -719,8 +974,8 @@ class BaseStrategy:
     def get_5m_moving_averages(self, symbol):
         return self.manager.get_5m_moving_averages(symbol)
 
-    def get_positions_bybit(self):
-        position_data = self.exchange.get_positions_bybit(self.symbol)
+    def get_positions_bybit(self, symbol):
+        position_data = self.exchange.get_positions_bybit(symbol)
         return position_data
 
     def calculate_short_take_profit_bybit(self, short_pos_price, symbol):
@@ -980,8 +1235,8 @@ class BaseStrategy:
         should_long = best_bid_price < ma_3_high
         return should_short, should_long
 
-    def get_5m_averages(self):
-        ma_values = self.manager.get_5m_moving_averages(self.symbol)
+    def get_5m_averages(self, symbol):
+        ma_values = self.manager.get_5m_moving_averages(symbol)
         if ma_values is not None:
             high_value = ma_values["MA_3_H"]
             low_value = ma_values["MA_3_L"]
@@ -1322,30 +1577,30 @@ class BaseStrategy:
         with open(os.path.join(data_directory, "open_symbols_count.json"), "w") as f:
             json.dump({"count": open_symbols_count}, f)
 
-    def manage_liquidation_risk(self, long_pos_price, short_pos_price, long_liq_price, short_liq_price, symbol, amount):
-        # Create some thresholds for when to act
-        long_threshold = self.config.long_liq_pct
-        short_threshold = self.config.short_liq_pct
+    # def manage_liquidation_risk(self, long_pos_price, short_pos_price, long_liq_price, short_liq_price, symbol, amount):
+    #     # Create some thresholds for when to act
+    #     long_threshold = self.config.long_liq_pct
+    #     short_threshold = self.config.short_liq_pct
 
-        # Let's assume you have methods to get the best bid and ask prices
-        best_bid_price = self.exchange.get_orderbook(symbol)['bids'][0][0]
-        best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
+    #     # Let's assume you have methods to get the best bid and ask prices
+    #     best_bid_price = self.exchange.get_orderbook(symbol)['bids'][0][0]
+    #     best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
 
-        # Check if the long position is close to being liquidated
-        if long_pos_price is not None and long_liq_price is not None:
-            long_diff = abs(long_pos_price - long_liq_price) / long_pos_price
-            if long_diff < long_threshold:
-                # Place a post-only limit order to offset the risk
-                self.postonly_limit_order_bybit(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
-                logging.info(f"Placed a post-only limit order to offset long position risk on {symbol} at {best_bid_price}")
+    #     # Check if the long position is close to being liquidated
+    #     if long_pos_price is not None and long_liq_price is not None:
+    #         long_diff = abs(long_pos_price - long_liq_price) / long_pos_price
+    #         if long_diff < long_threshold:
+    #             # Place a post-only limit order to offset the risk
+    #             self.postonly_limit_order_bybit(symbol, "buy", amount, best_bid_price, positionIdx=1, reduceOnly=False)
+    #             logging.info(f"Placed a post-only limit order to offset long position risk on {symbol} at {best_bid_price}")
 
-        # Check if the short position is close to being liquidated
-        if short_pos_price is not None and short_liq_price is not None:
-            short_diff = abs(short_pos_price - short_liq_price) / short_pos_price
-            if short_diff < short_threshold:
-                # Place a post-only limit order to offset the risk
-                self.postonly_limit_order_bybit(symbol, "sell", amount, best_ask_price, positionIdx=2, reduceOnly=False)
-                logging.info(f"Placed a post-only limit order to offset short position risk on {symbol} at {best_ask_price}")
+    #     # Check if the short position is close to being liquidated
+    #     if short_pos_price is not None and short_liq_price is not None:
+    #         short_diff = abs(short_pos_price - short_liq_price) / short_pos_price
+    #         if short_diff < short_threshold:
+    #             # Place a post-only limit order to offset the risk
+    #             self.postonly_limit_order_bybit(symbol, "sell", amount, best_ask_price, positionIdx=2, reduceOnly=False)
+    #             logging.info(f"Placed a post-only limit order to offset short position risk on {symbol} at {best_ask_price}")
 
     def get_active_order_count(self, symbol):
         try:
@@ -1404,7 +1659,7 @@ class BaseStrategy:
 
             # Adjust helper_wall_size based on the larger position
             base_helper_wall_size = self.helper_wall_size
-            adjusted_helper_wall_size = base_helper_wall_size + 5
+            adjusted_helper_wall_size = base_helper_wall_size + 2
 
             # Initialize variables
             helper_orders = []
@@ -1712,12 +1967,12 @@ class BaseStrategy:
         return amount
 
     def play_the_spread_entry_and_tp(self, symbol, open_orders, long_dynamic_amount, short_dynamic_amount, long_pos_qty, short_pos_qty, long_pos_price, short_pos_price):
-        order_book = self.exchange.get_orderbook(symbol)
+        analyzer = OrderBookAnalyzer(self.exchange, symbol)
 
-        imbalance = self.get_order_book_imbalance(symbol)
+        imbalance = analyzer.get_order_book_imbalance()
 
-        best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
-        best_bid_price = self.exchange.get_orderbook(symbol)['bids'][0][0]
+        best_ask_price = analyzer.get_best_prices()[1]
+        best_bid_price = analyzer.get_best_prices()[0]
 
         long_dynamic_amount = self.m_order_amount(symbol, "long", long_dynamic_amount)
         short_dynamic_amount = self.m_order_amount(symbol, "short", short_dynamic_amount)
@@ -1738,8 +1993,8 @@ class BaseStrategy:
         avg_top_bids = sum([bid[0] for bid in top_bids]) / 5
 
         # Identify potential resistance (sell walls) and support (buy walls)
-        sell_walls = self.identify_walls(order_book, "sell")
-        buy_walls = self.identify_walls(order_book, "buy")
+        sell_walls = analyzer.identify_walls(order_book, "sell")
+        buy_walls = analyzer.identify_walls(order_book, "buy")
 
         # Calculate the current profit for long and short positions
         long_profit = (avg_top_asks - long_pos_price) * long_pos_qty if long_pos_qty > 0 else 0
@@ -1791,7 +2046,7 @@ class BaseStrategy:
                 short_take_profit = min(avg_top_bids * (1 + short_trading_fee), short_pos_price - 0.0001)  # Ensure TP is below the short position price
 
             self.bybit_hedge_placetp_maker(symbol, short_pos_qty, short_take_profit, positionIdx=2, order_side="buy", open_orders=open_orders)
-
+            
     def set_spread_take_profits(self, symbol, open_orders, long_pos_qty, short_pos_qty, long_pos_price, short_pos_price):
 
         order_book = self.exchange.get_orderbook(symbol)
@@ -2297,6 +2552,50 @@ class BaseStrategy:
             else:
                 logging.info(f"Volume or distance conditions not met for {symbol}, skipping entry.")
 
+    def get_best_bid_price(self, symbol):
+        """Fetch the best bid price for a given symbol, with a fallback to last known bid price."""
+        try:
+            order_book = self.exchange.get_orderbook(symbol)
+            
+            # Check for bids in the order book and fetch the best bid price
+            if 'bids' in order_book and len(order_book['bids']) > 0:
+                best_bid_price = order_book['bids'][0][0]
+                self.last_known_bid[symbol] = best_bid_price  # Update last known bid price
+            else:
+                best_bid_price = self.last_known_bid.get(symbol)  # Use last known bid price
+                if best_bid_price is None:
+                    logging.warning(f"Best bid price is not available for {symbol}. Defaulting to 0.0.")
+                    best_bid_price = 0.0  # Default to 0.0 if no known bid price
+            
+            # Ensure the bid price is a float
+            return float(best_bid_price)
+        
+        except Exception as e:
+            logging.error(f"Error fetching best bid price for {symbol}: {e}")
+            return 0.0  # Return 0.0 in case of failure
+    
+    def get_best_ask_price(self, symbol):
+        """Fetch the best ask price for a given symbol, with a fallback to last known ask price."""
+        try:
+            order_book = self.exchange.get_orderbook(symbol)
+            
+            # Check for asks in the order book and fetch the best ask price
+            if 'asks' in order_book and len(order_book['asks']) > 0:
+                best_ask_price = order_book['asks'][0][0]
+                self.last_known_ask[symbol] = best_ask_price  # Update last known ask price
+            else:
+                best_ask_price = self.last_known_ask.get(symbol)  # Use last known ask price
+                if best_ask_price is None:
+                    logging.warning(f"Best ask price is not available for {symbol}. Defaulting to 0.0.")
+                    best_ask_price = 0.0  # Default to 0.0 if no known ask price
+            
+            # Ensure the ask price is a float
+            return float(best_ask_price)
+        
+        except Exception as e:
+            logging.error(f"Error fetching best ask price for {symbol}: {e}")
+            return 0.0  # Return 0.0 in case of failure
+            
     def get_mfirsi_ema_secondary_ema_bollinger(self, symbol: str, limit: int = 100, lookback: int = 1, ema_period: int = 5, secondary_ema_period: int = 3) -> str:
         # Fetch OHLCV data
         ohlcv_data = self.exchange.fetch_ohlcv(symbol=symbol, timeframe='1m', limit=limit)
@@ -2671,170 +2970,7 @@ class BaseStrategy:
         volatility_metric = atr / df['close'].iloc[-1]  # Example: normalized by the latest closing price
 
         return volatility_metric
-
-    # Credit to 53RG0
-    def normalize(self, series):
-        scaler = MinMaxScaler()
-        series = series.values.reshape(-1, 1)
-        normalized_series = scaler.fit_transform(series).flatten()
-        return pd.Series(normalized_series, index=series.index)
-
-    def rescale(self, series, new_min=0, new_max=1):
-        old_min, old_max = series.min(), series.max()
-        rescaled_series = new_min + (new_max - new_min) * (series - old_min) / (old_max - old_min)
-        return pd.Series(rescaled_series, index=series.index)
-
-    def n_rsi(self, series, n1, n2):
-        rsi = ta.momentum.RSIIndicator(series, window=n1).rsi()
-        return self.rescale(rsi.ewm(span=n2, adjust=False).mean())
-
-    def n_cci(self, high, low, close, n1, n2):
-        cci = ta.trend.CCIIndicator(high, low, close, window=n1).cci()
-        return self.normalize(cci.ewm(span=n2, adjust=False).mean())
-
-    def n_wt(self, hlc3, n1=10, n2=11):
-        ema1 = ta.trend.EMAIndicator(hlc3, window=n1).ema_indicator()
-        ema2 = ta.trend.EMAIndicator(abs(hlc3 - ema1), window=n1).ema_indicator()
-        ci = (hlc3 - ema1) / (0.015 * ema2)
-        wt1 = ta.trend.EMAIndicator(ci, window=n2).ema_indicator()
-        wt2 = ta.trend.SMAIndicator(wt1, window=4).sma_indicator()
-        return self.normalize(wt1 - wt2)
-
-    def n_adx(self, high, low, close, n1):
-        adx = ta.trend.ADXIndicator(high, low, close, window=n1).adx()
-        return self.rescale(adx)
-
-    def regime_filter(self, series, high, low, use_regime_filter, threshold):
-        if not use_regime_filter:
-            return pd.Series([True] * len(series))
-
-        def klmf(series, high, low):
-            value1 = pd.Series(0, index=series.index)
-            value2 = pd.Series(0, index=series.index)
-            klmf = pd.Series(0, index=series.index)
-            for i in range(1, len(series)):
-                value1[i] = 0.2 * (series[i] - series[i - 1]) + 0.8 * value1[i - 1]
-                value2[i] = 0.1 * (high[i] - low[i]) + 0.8 * value2[i - 1]
-            omega = abs(value1 / value2)
-            alpha = (-omega ** 2 + np.sqrt(omega ** 4 + 16 * omega ** 2)) / 8
-            for i in range(1, len(series)):
-                klmf[i] = alpha[i] * series[i] + (1 - alpha[i]) * klmf[i - 1]
-            return klmf
-
-        klmf_values = klmf(series, high, low)
-        abs_curve_slope = abs(klmf_values.diff())
-        exponential_average_abs_curve_slope = ta.trend.EMAIndicator(abs_curve_slope, window=200).ema_indicator()
-        normalized_slope_decline = (abs_curve_slope - exponential_average_abs_curve_slope) / exponential_average_abs_curve_slope
-        return normalized_slope_decline >= threshold
-
-    def filter_adx(self, close, high, low, adx_threshold, use_adx_filter, length=14):
-        if not use_adx_filter:
-            return pd.Series([True] * len(close))
-        adx = ta.trend.ADXIndicator(high, low, close, window=length).adx()
-        return adx > adx_threshold
-
-    def filter_volatility(self, high, low, close, use_volatility_filter, min_length=1, max_length=10):
-        if not use_volatility_filter:
-            return pd.Series([True] * len(close))
-        recent_atr = ta.volatility.AverageTrueRange(high, low, close, window=min_length).average_true_range()
-        historical_atr = ta.volatility.AverageTrueRange(high, low, close, window=max_length).average_true_range()
-        return recent_atr > historical_atr
-
-    def lorentzian_distance(self, feature_series, feature_arrays):
-        distances = np.log(1 + np.abs(feature_series - feature_arrays))
-        return distances.sum(axis=1)
-
-    def generate__l_signals(self, symbol, limit=1000, neighbors_count=8):
-        ohlcv_data = self.fetch_ohlcv(symbol=symbol, timeframe='3m', limit=limit)
-        df = pd.DataFrame(ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df.set_index('timestamp', inplace=True)
-
-        df['rsi'] = self.n_rsi(df['close'], 14, 1)
-        df['adx'] = self.n_adx(df['high'], df['low'], df['close'], 14)
-        df['cci'] = self.n_cci(df['high'], df['low'], df['close'], 20, 1)
-        df['wt'] = self.n_wt((df['high'] + df['low'] + df['close']) / 3, 10, 11)
-
-        features = df[['rsi', 'adx', 'cci', 'wt']].values
-        feature_series = features[-1]
-        feature_arrays = features[:-1]
-
-        distances = self.lorentzian_distance(feature_series, feature_arrays)
-        nearest_indices = distances.argsort()[:neighbors_count]
-
-        y_train_series = np.where(df['close'].shift(-4) > df['close'], 1, -1)
-        y_train_series = y_train_series.values[:-1]
-        predictions = y_train_series[nearest_indices]
-        prediction = np.sum(predictions)
-
-        df['ema'] = ta.trend.EMAIndicator(df['close'], window=200).ema_indicator()
-        df['sma'] = ta.trend.SMAIndicator(df['close'], window=200).sma_indicator()
-
-        is_ema_uptrend = df['close'] > df['ema']
-        is_ema_downtrend = df['close'] < df['ema']
-        is_sma_uptrend = df['close'] > df['sma']
-        is_sma_downtrend = df['close'] < df['sma']
-
-        if prediction > 0 and is_ema_uptrend.iloc[-1] and is_sma_uptrend.iloc[-1]:
-            return 'long'
-        elif prediction < 0 and is_ema_downtrend.iloc[-1] and is_sma_downtrend.iloc[-1]:
-            return 'short'
-        else:
-            return 'neutral'
-
-    def get_l_signal(self, symbol: str, limit: int = 1000, neighbors_count: int = 8) -> str:
-        # Fetch OHLCV data
-        ohlcv_data = self.fetch_ohlcv(symbol=symbol, timeframe='1m', limit=limit)
-        df = pd.DataFrame(ohlcv_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        
-        # Calculate technical indicators
-        df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-        df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
-        df['cci'] = ta.trend.CCIIndicator(df['high'], df['low'], df['close'], window=20).cci()
-        
-        # Normalize indicators
-        def normalize(series):
-            return (series - series.min()) / (series.max() - series.min())
-        
-        df['rsi'] = normalize(df['rsi'])
-        df['adx'] = normalize(df['adx'])
-        df['cci'] = normalize(df['cci'])
-        
-        # Prepare feature matrix
-        features = df[['rsi', 'adx', 'cci']].values
-        distances = []
-        
-        # Calculate Lorentzian distances
-        for i in range(len(features) - 1):
-            dist = np.sum(np.log(1 + np.abs(features[-1] - features[i])))
-            distances.append(dist)
-        
-        distances = np.array(distances)
-        nearest_indices = distances.argsort()[:neighbors_count]
-        
-        # Determine prediction based on nearest neighbors
-        close_prices = df['close'].values
-        predictions = [1 if close_prices[idx + 4] > close_prices[idx] else -1 for idx in nearest_indices]
-        prediction = np.sum(predictions)
-        
-        # Filters (simple EMA and SMA trend filters)
-        ema_period = 200
-        sma_period = 200
-        df['ema'] = df['close'].ewm(span=ema_period, adjust=False).mean()
-        df['sma'] = df['close'].rolling(window=sma_period).mean()
-        
-        is_ema_uptrend = df['close'].iloc[-1] > df['ema'].iloc[-1]
-        is_ema_downtrend = df['close'].iloc[-1] < df['ema'].iloc[-1]
-        is_sma_uptrend = df['close'].iloc[-1] > df['sma'].iloc[-1]
-        is_sma_downtrend = df['close'].iloc[-1] < df['sma'].iloc[-1]
-        
-        # Generate signals
-        if prediction > 0 and is_ema_uptrend and is_sma_uptrend:
-            return 'long'
-        elif prediction < 0 and is_ema_downtrend and is_sma_downtrend:
-            return 'short'
-        else:
-            return 'neutral'
-
+    
     def liq_stop_loss_logic(self, long_pos_qty, long_pos_price, long_liquidation_price, short_pos_qty, short_pos_price, short_liquidation_price, liq_stoploss_enabled, symbol, liq_price_stop_pct):
         if liq_stoploss_enabled:
             try:
@@ -4924,77 +5060,6 @@ class BaseStrategy:
 
                 time.sleep(5)
 
-
-    def bybit_qs_entry_exit_eri(self, open_orders: list, symbol: str, trend: str, mfi: str, eri_trend: str, five_minute_volume: float, five_minute_distance: float, min_vol: float, min_dist: float, long_dynamic_amount: float, short_dynamic_amount: float, long_pos_qty: float, short_pos_qty: float, long_pos_price: float, short_pos_price: float, should_long: bool, should_short: bool, should_add_to_long: bool, should_add_to_short: bool, hedge_ratio: float, price_difference_threshold: float):
-        if five_minute_volume > min_vol:
-            # Fetch necessary data
-            bid_walls, ask_walls = self.detect_order_book_walls(symbol)
-            largest_bid_wall = max(bid_walls, key=lambda x: x[1], default=None)
-            largest_ask_wall = max(ask_walls, key=lambda x: x[1], default=None)
-
-            qfl_base, qfl_ceiling = self.calculate_qfl_levels(symbol=symbol, timeframe='5m', lookback_period=12)
-            current_price = self.exchange.get_current_price(symbol)
-
-            # Fetch and process order book
-            order_book = self.exchange.get_orderbook(symbol)
-
-            # Extract and update best ask/bid prices
-            if 'asks' in order_book and len(order_book['asks']) > 0:
-                best_ask_price = order_book['asks'][0][0]
-            else:
-                best_ask_price = self.last_known_ask.get(symbol)
-
-            if 'bids' in order_book and len(order_book['bids']) > 0:
-                best_bid_price = order_book['bids'][0][0]
-            else:
-                best_bid_price = self.last_known_bid.get(symbol)
-
-            min_order_size = 1
-
-            # Trend Alignment Checks
-            trend_aligned_long = (eri_trend == "bullish" or trend.lower() == "long")
-            trend_aligned_short = (eri_trend == "bearish" or trend.lower() == "short")
-
-            # MFI Signal Checks
-            mfi_signal_long = mfi.lower() == "long"
-            mfi_signal_short = mfi.lower() == "short"
-
-            self.auto_hedge_orders_bybit(symbol,
-            long_pos_qty,
-            short_pos_qty,
-            long_pos_price,
-            short_pos_price,
-            best_ask_price,
-            best_bid_price,
-            hedge_ratio,
-            price_difference_threshold,
-            min_order_size)
-
-            # Long Entry based on trend and MFI
-            if (should_long or should_add_to_long) and current_price >= qfl_base and trend_aligned_long and mfi_signal_long:
-                self.process_long_entry_qs(symbol, long_pos_qty, open_orders, long_dynamic_amount, current_price, long_pos_price)
-
-            # Short Entry based on trend and MFI
-            if (should_short or should_add_to_short) and current_price <= qfl_ceiling and trend_aligned_short and mfi_signal_short:
-                self.process_short_entry_qs(symbol, short_pos_qty, open_orders, short_dynamic_amount, current_price, short_pos_price)
-
-            # Order Book Wall Long Entry Logic
-            if largest_bid_wall and not self.entry_order_exists(open_orders, "buy"):
-                if (should_long or should_add_to_long) and trend_aligned_long and mfi_signal_short:
-                    logging.info(f"Placing additional long trade due to detected buy wall for {symbol}")
-                    self.place_postonly_order_bybit(symbol, "buy", long_dynamic_amount, largest_bid_wall[0], positionIdx=1, reduceOnly=False)
-
-            # Order Book Wall Short Entry Logic
-            if largest_ask_wall and not self.entry_order_exists(open_orders, "sell"):
-                if (should_short or should_add_to_short) and trend_aligned_short and mfi_signal_long:
-                    logging.info(f"Placing additional short trade due to detected sell wall for {symbol}")
-                    self.place_postonly_order_bybit(symbol, "sell", short_dynamic_amount, largest_ask_wall[0], positionIdx=2, reduceOnly=False)
-
-        else:
-            logging.info(f"Volume or distance conditions not met for {symbol}, skipping entry.")
-
-        time.sleep(5)
-
     def bybit_qs_entry_exit_eri(self, open_orders: list, symbol: str, trend: str, mfi: str, eri_trend: str, five_minute_volume: float, five_minute_distance: float, min_vol: float, min_dist: float, long_dynamic_amount: float, short_dynamic_amount: float, long_pos_qty: float, short_pos_qty: float, long_pos_price: float, short_pos_price: float, should_long: bool, should_short: bool, should_add_to_long: bool, should_add_to_short: bool, hedge_ratio: float, price_difference_threshold: float):
         if five_minute_volume > min_vol:
             # Fetch necessary data
@@ -5185,94 +5250,6 @@ class BaseStrategy:
                     self.place_postonly_order_bybit(symbol, "sell", short_dynamic_amount, best_ask_price, positionIdx=2, reduceOnly=False)
                     logging.info(f"Placing additional long for {symbol}")
                     time.sleep(5)
-
-    # Aggressive TP spread update
-    def update_aggressive_take_profit_bybit(self, symbol, pos_qty, current_price, positionIdx, order_side, open_orders, next_tp_update, entry_time):
-        existing_tps = self.get_open_take_profit_order_quantities(open_orders, order_side)
-        total_existing_tp_qty = sum(qty for qty, _ in existing_tps)
-        logging.info(f"Existing {order_side} TPs: {existing_tps}")
-
-        now = datetime.now()
-        time_since_entry = now - entry_time
-
-        # Aggressively set the take-profit price close to the current market price
-        aggressive_take_profit_price = current_price * 1.01 if order_side == 'buy' else current_price * 0.99
-
-        if now >= next_tp_update or not math.isclose(total_existing_tp_qty, pos_qty) or time_since_entry > timedelta(minutes=5):  # 5-minute check
-            try:
-                for qty, existing_tp_id in existing_tps:
-                    self.exchange.cancel_order_by_id(existing_tp_id, symbol)
-                    logging.info(f"{order_side.capitalize()} take profit {existing_tp_id} canceled")
-                    time.sleep(0.05)
-
-                # Create multiple take-profit orders at different levels
-                for i in range(1, 4):  # Creating 3 take-profit levels
-                    partial_qty = pos_qty // 3
-                    partial_tp_price = aggressive_take_profit_price * (1 + 0.005 * i) if order_side == 'buy' else aggressive_take_profit_price * (1 - 0.005 * i)
-                    self.exchange.create_take_profit_order_bybit(symbol, "limit", order_side, partial_qty, partial_tp_price, positionIdx=positionIdx, reduce_only=True)
-                    logging.info(f"{order_side.capitalize()} take profit set at {partial_tp_price} with qty {partial_qty}")
-
-                next_tp_update = self.calculate_next_update_time()  # Calculate the next update time after placing the order
-            except Exception as e:
-                logging.info(f"Error in updating {order_side} TP: {e}")
-
-        return next_tp_update
-
-    def update_take_profit_spread_bybit_v2(self, symbol, pos_qty, short_take_profit, long_take_profit, short_pos_price, long_pos_price, positionIdx, order_side, next_tp_update, five_minute_distance, previous_five_minute_distance, max_retries=10):
-        # Fetch the current open TP orders for the symbol
-        long_tp_orders, short_tp_orders = self.exchange.get_open_tp_orders(symbol)
-
-        logging.info(f"From update_take_profit_spread : Calculated short TP for {symbol}: {short_take_profit}")
-        logging.info(f"From update_take_profit_spread : Calculated long TP for {symbol}: {long_take_profit}")
-
-        # Determine the take profit price based on the order side
-        take_profit_price = long_take_profit if order_side == "sell" else short_take_profit
-        logging.info(f"Determined TP price for {symbol} {order_side}: {take_profit_price}")
-
-        # Determine the relevant TP orders and quantities based on the order side
-        relevant_tp_orders = long_tp_orders if order_side == "sell" else short_tp_orders
-
-        # Check if there's an existing TP order with a mismatched quantity
-        mismatched_qty_orders = [order for order in relevant_tp_orders if order['qty'] != pos_qty]
-
-        # If mismatched TP orders exist, cancel them
-        if mismatched_qty_orders:
-            for order in mismatched_qty_orders:
-                try:
-                    self.exchange.cancel_order_by_id(order['id'], symbol)
-                    logging.info(f"{order_side.capitalize()} take profit {order['id']} canceled due to mismatched quantity.")
-                    time.sleep(0.05)
-                except Exception as e:
-                    logging.info(f"Error in cancelling {order_side} TP order {order['id']}. Error: {e}")
-
-        # Proceed to set or update TP orders
-        now = datetime.now()
-        if now >= next_tp_update:
-            try:
-                retries = 0
-                success = False
-                while retries < max_retries and not success:
-                    try:
-                        tp_order = self.exchange.create_take_profit_order_bybit(symbol, "limit", order_side, pos_qty, take_profit_price, positionIdx=positionIdx, reduce_only=True)
-                        logging.info(f"{order_side.capitalize()} take profit set at {take_profit_price}")
-
-                        # If a new TP order is placed, check if it's part of a hedge and mark it accordingly
-                        if self.is_hedged_position(symbol):
-                            self.mark_hedge_tp_order(symbol, tp_order, order_side)
-
-                        success = True
-                    except Exception as e:
-                        logging.info(f"Failed to set {order_side} TP for {symbol}. Retry {retries + 1}/{max_retries}. Error: {e}")
-                        retries += 1
-                        time.sleep(1)  # Wait for a moment before retrying
-
-                next_tp_update = self.calculate_next_update_time()  # Calculate the next update time after placing the order
-            except Exception as e:
-                logging.info(f"Error in updating {order_side} TP: {e}")
-        else:
-            logging.info(f"Take profit already exists for {symbol} {order_side} with correct quantity. Skipping update.")
-
-        return next_tp_update
 
     def update_quickscalp_take_profit_bybit(self, symbol, pos_qty, upnl_profit_pct, short_pos_price, long_pos_price, positionIdx, order_side, last_tp_update, max_retries=10):
         try:
@@ -5514,81 +5491,6 @@ class BaseStrategy:
             logging.info(f"Decreasing position. New qty: {new_qty}, New leverage: {new_leverage}")
 
         return new_qty, new_leverage
-
-    def set_position_leverage_long_bybit(self, symbol, long_pos_qty, total_equity, best_ask_price, max_leverage, auto_leverage_upscale):
-        # Ensure a lock exists for this symbol
-        if symbol not in self.symbol_locks:
-            self.symbol_locks[symbol] = threading.Lock()
-
-        with self.symbol_locks[symbol]:
-            if symbol not in self.initial_max_long_trade_qty_per_symbol:
-                logging.warning(f"Symbol {symbol} not initialized in initial_max_long_trade_qty_per_symbol. Initializing now...")
-                self.initial_max_long_trade_qty_per_symbol[symbol] = self.calc_max_trade_qty(symbol, total_equity, best_ask_price, max_leverage)
-
-            if symbol not in self.long_pos_leverage_per_symbol:
-                logging.warning(f"Symbol {symbol} not initialized in long_pos_leverage_per_symbol. Initializing now...")
-                self.long_pos_leverage_per_symbol[symbol] = 0.001  # starting leverage
-                logging.info(f"Long leverage set to {self.long_pos_leverage_per_symbol[symbol]} for {symbol}")
-
-            if auto_leverage_upscale:
-                if long_pos_qty >= self.initial_max_long_trade_qty_per_symbol[symbol] and self.long_pos_leverage_per_symbol[symbol] < self.MAX_LEVERAGE:
-                    self.max_long_trade_qty_per_symbol[symbol], self.long_pos_leverage_per_symbol[symbol] = self.adjust_leverage_and_qty(
-                        symbol,
-                        long_pos_qty,
-                        self.long_pos_leverage_per_symbol[symbol],
-                        max_leverage,
-                        increase=True
-                    )
-                    logging.info(f"Long leverage for {symbol} temporarily increased to {self.long_pos_leverage_per_symbol[symbol]}x")
-
-                elif long_pos_qty < (self.max_long_trade_qty_per_symbol.get(symbol, 0) / 2) and self.long_pos_leverage_per_symbol.get(symbol, 0) > 1.0:
-                    self.max_long_trade_qty_per_symbol[symbol], self.long_pos_leverage_per_symbol[symbol] = self.adjust_leverage_and_qty(
-                        symbol,
-                        long_pos_qty,
-                        self.long_pos_leverage_per_symbol[symbol],
-                        max_leverage,
-                        increase=False
-                    )
-                    logging.info(f"Long leverage for {symbol} returned to normal {self.long_pos_leverage_per_symbol[symbol]}x")
-            else:
-                logging.info(f"Auto leverage upscale is disabled for {symbol}.")
-
-    def set_position_leverage_short_bybit(self, symbol, short_pos_qty, total_equity, best_ask_price, max_leverage, auto_leverage_upscale):
-        # Ensure a lock exists for this symbol
-        if symbol not in self.symbol_locks:
-            self.symbol_locks[symbol] = threading.Lock()
-
-        with self.symbol_locks[symbol]:
-            if symbol not in self.initial_max_short_trade_qty_per_symbol:
-                logging.warning(f"Symbol {symbol} not initialized in initial_max_short_trade_qty_per_symbol. Initializing now...")
-                self.initial_max_short_trade_qty_per_symbol[symbol] = self.calc_max_trade_qty(symbol, total_equity, best_ask_price, max_leverage)
-
-            if symbol not in self.short_pos_leverage_per_symbol:
-                logging.warning(f"Symbol {symbol} not initialized in short_pos_leverage_per_symbol. Initializing now...")
-                self.short_pos_leverage_per_symbol[symbol] = 0.001  # starting leverage
-
-            if auto_leverage_upscale:
-                if short_pos_qty >= self.initial_max_short_trade_qty_per_symbol[symbol] and self.short_pos_leverage_per_symbol[symbol] < self.MAX_LEVERAGE:
-                    self.max_short_trade_qty_per_symbol[symbol], self.short_pos_leverage_per_symbol[symbol] = self.adjust_leverage_and_qty(
-                        symbol,
-                        short_pos_qty,
-                        self.short_pos_leverage_per_symbol[symbol],
-                        max_leverage,
-                        increase=True
-                    )
-                    logging.info(f"Short leverage for {symbol} temporarily increased to {self.short_pos_leverage_per_symbol[symbol]}x")
-
-                elif short_pos_qty < (self.max_short_trade_qty_per_symbol.get(symbol, 0) / 2) and self.short_pos_leverage_per_symbol.get(symbol, 0) > 1.0:
-                    self.max_short_trade_qty_per_symbol[symbol], self.short_pos_leverage_per_symbol[symbol] = self.adjust_leverage_and_qty(
-                        symbol,
-                        short_pos_qty,
-                        self.short_pos_leverage_per_symbol[symbol],
-                        max_leverage,
-                        increase=False
-                    )
-                    logging.info(f"Short leverage for {symbol} returned to normal {self.short_pos_leverage_per_symbol[symbol]}x")
-            else:
-                logging.info(f"Auto leverage upscale is disabled for {symbol}.")
 
 # Bybit position leverage management
 

@@ -13,21 +13,21 @@ from directionalscalper.core.strategies.bybit.bybit_strategy import BybitStrateg
 from directionalscalper.core.exchanges.bybit import BybitExchange
 from directionalscalper.core.strategies.logger import Logger
 from live_table_manager import shared_symbols_data
-logging = Logger(logger_name="BybitDynamicGridSpanOBLevelsLSignal", filename="BybitDynamicGridSpanOBLevelsLSignal.log", stream=True)
+from rate_limit import RateLimit
+logging = Logger(logger_name="LinearGridBase", filename="LinearGridBase.log", stream=True)
 
 symbol_locks = {}
 
-class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
+class LinearGridBaseFutures(BybitStrategy):
     def __init__(self, exchange, manager, config, symbols_allowed=None, rotator_symbols_standardized=None, mfirsi_signal=None):
         super().__init__(exchange, config, manager, symbols_allowed)
+        self.rate_limiter = RateLimit(10, 1)
+        self.general_rate_limiter = RateLimit(50, 1)
+        self.order_rate_limiter = RateLimit(5, 1) 
         self.mfirsi_signal = mfirsi_signal
         self.is_order_history_populated = False
         self.last_health_check_time = time.time()
         self.health_check_interval = 600
-        self.last_long_tp_update = datetime.now()
-        self.last_short_tp_update = datetime.now()
-        self.next_long_tp_update = datetime.now() - timedelta(seconds=1)
-        self.next_short_tp_update = datetime.now() - timedelta(seconds=1)
         self.last_helper_order_cancel_time = 0
         self.helper_active = False
         self.helper_wall_size = 5
@@ -35,6 +35,9 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
         self.helper_interval = 1
         self.running_long = False
         self.running_short = False
+        self.last_known_equity = 0.0
+        self.last_known_upnl = {}
+        self.last_known_mas = {}
         ConfigInitializer.initialize_config_attributes(self, config)
         self._initialize_symbol_locks(rotator_symbols_standardized)
 
@@ -108,6 +111,8 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
             last_equity_fetch_time = 0
             equity_refresh_interval = 30  # 30 minutes in seconds
 
+            fetched_total_equity = None
+
             # # Clean out orders
             # self.exchange.cancel_all_orders_for_symbol_bybit(symbol)
             # logging.info(f"Canceled all orders for {symbol}")
@@ -120,7 +125,7 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
 
             logging.info(f"Max leverage for {symbol}: {self.max_leverage}")
 
-            self.adjust_risk_parameters(exchange_max_leverage=self.max_leverage)
+            # self.adjust_risk_parameters(exchange_max_leverage=self.max_leverage)
 
             self.exchange.set_leverage_bybit(self.max_leverage, symbol)
             self.exchange.set_symbol_to_cross_margin(symbol, self.max_leverage)
@@ -166,6 +171,12 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
             graceful_stop_long = self.config.linear_grid['graceful_stop_long']
             graceful_stop_short = self.config.linear_grid['graceful_stop_short']
             additional_entries_from_signal = self.config.linear_grid['additional_entries_from_signal']
+            stop_loss_long = self.config.linear_grid['stop_loss_long']
+            stop_loss_short = self.config.linear_grid['stop_loss_short']
+            stop_loss_enabled = self.config.linear_grid['stop_loss_enabled']
+
+            grid_behavior = self.config.linear_grid.get('grid_behavior', 'infinite')
+            drawdown_behavior = self.config.linear_grid.get('drawdown_behavior', 'maxqtypercent')
 
             # reissue_threshold_inposition = self.config.linear_grid['reissue_threshold_inposition']
 
@@ -200,8 +211,6 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
         
             max_pos_balance_pct = self.config.max_pos_balance_pct
 
-            auto_leverage_upscale = self.config.auto_leverage_upscale
-
             # Funding
             MaxAbsFundingRate = self.config.MaxAbsFundingRate
             
@@ -218,16 +227,16 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
             previous_five_minute_distance = None
 
             since_timestamp = int((datetime.now() - timedelta(days=1)).timestamp() * 1000)  # 24 hours ago in milliseconds
-            recent_trades = self.fetch_recent_trades_for_symbol(symbol, since=since_timestamp, limit=20)
+            # recent_trades = self.fetch_recent_trades_for_symbol(symbol, since=since_timestamp, limit=20)
 
-            #logging.info(f"Recent trades for {symbol} : {recent_trades}")
+            # #logging.info(f"Recent trades for {symbol} : {recent_trades}")
 
-            # Check if there are any trades in the last 24 hours
-            recent_activity = any(trade['timestamp'] >= since_timestamp for trade in recent_trades)
-            if recent_activity:
-                logging.info(f"Recent trading activity detected for {symbol}")
-            else:
-                logging.info(f"No recent trading activity for {symbol} in the last 24 hours")
+            # # Check if there are any trades in the last 24 hours
+            # recent_activity = any(trade['timestamp'] >= since_timestamp for trade in recent_trades)
+            # if recent_activity:
+            #     logging.info(f"Recent trading activity detected for {symbol}")
+            # else:
+            #     logging.info(f"No recent trading activity for {symbol} in the last 24 hours")
 
 
             while self.running_long or self.running_short:
@@ -249,10 +258,10 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
 
                 leverage_tiers = self.exchange.fetch_leverage_tiers(symbol)
 
-                if leverage_tiers:
-                    logging.info(f"Leverage tiers for {symbol}: {leverage_tiers}")
-                else:
-                    logging.error(f"Failed to fetch leverage tiers for {symbol}.")
+                # if leverage_tiers:
+                #     logging.info(f"Leverage tiers for {symbol}: {leverage_tiers}")
+                # else:
+                #     logging.error(f"Failed to fetch leverage tiers for {symbol}.")
 
 
                 logging.info(f"Max USD value: {self.max_usd_value}")
@@ -315,9 +324,27 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
 
                 # logging.info(f"{symbol} last update time: {position_last_update_time}")
 
-                # Fetch equity data less frequently or if it's not available yet
-                if current_time - last_equity_fetch_time > equity_refresh_interval or total_equity is None:
-                    total_equity = self.retry_api_call(self.exchange.get_futures_balance_bybit, quote_currency)
+                # Fetch equity data
+                fetched_total_equity = self.retry_api_call(self.exchange.get_futures_balance_bybit, quote_currency)
+
+                logging.info(f"Fetched total equity: {fetched_total_equity}")
+
+                # Attempt to convert fetched_total_equity to a float
+                try:
+                    fetched_total_equity = float(fetched_total_equity)
+                except (ValueError, TypeError):
+                    logging.warning(f"Fetched total equity could not be converted to float: {fetched_total_equity}. Resorting to last known equity.")
+                    fetched_total_equity = None
+
+                # Refresh equity if interval passed or fetched equity is 0.0
+                if current_time - last_equity_fetch_time > equity_refresh_interval or fetched_total_equity == 0.0:
+                    if fetched_total_equity is not None and fetched_total_equity > 0.0:
+                        total_equity = fetched_total_equity
+                        self.last_known_equity = total_equity  # Update the last known equity
+                    else:
+                        logging.warning("Failed to fetch valid total_equity or received 0.0. Using last known value.")
+                        total_equity = self.last_known_equity  # Use last known equity
+
                     available_equity = self.retry_api_call(self.exchange.get_available_balance_bybit, quote_currency)
                     last_equity_fetch_time = current_time
 
@@ -326,13 +353,13 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                     
                     # Log the type of total_equity
                     logging.info(f"Type of total_equity: {type(total_equity)}")
-                    
-                    # If total_equity is still None after fetching, log a warning and skip to the next iteration
+
+                    # If total_equity is still None (which it shouldn't be), log an error and skip the iteration
                     if total_equity is None:
-                        logging.warning("Failed to fetch total_equity. Skipping this iteration.")
+                        logging.error("This should not happen as total_equity should never be None. Skipping this iteration.")
                         time.sleep(10)  # wait for a short period before retrying
                         continue
-
+                    
                 blacklist = self.config.blacklist
                 if symbol in blacklist:
                     logging.info(f"Symbol {symbol} is in the blacklist. Stopping operations for this symbol.")
@@ -347,21 +374,62 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                 # best_ask_price = self.exchange.get_orderbook(symbol)['asks'][0][0]
                 # best_bid_price = self.exchange.get_orderbook(symbol)['bids'][0][0]
 
-                # Handling best ask price
+                # Handling best ask price with fallback mechanism
                 if 'asks' in order_book and len(order_book['asks']) > 0:
                     best_ask_price = order_book['asks'][0][0]
                     self.last_known_ask[symbol] = best_ask_price  # Update last known ask price
                 else:
                     best_ask_price = self.last_known_ask.get(symbol)  # Use last known ask price
+                    if best_ask_price is None:
+                        logging.warning(f"Best ask price is not available for {symbol}. Defaulting to last known ask price, which is also None.")
+                        best_ask_price = 0.0  # Default to 0.0 if None
 
-                # Handling best bid price
+                # Convert best_ask_price to float to ensure no type mismatches
+                best_ask_price = float(best_ask_price)
+
+                # Handling best bid price with fallback mechanism
                 if 'bids' in order_book and len(order_book['bids']) > 0:
                     best_bid_price = order_book['bids'][0][0]
                     self.last_known_bid[symbol] = best_bid_price  # Update last known bid price
                 else:
                     best_bid_price = self.last_known_bid.get(symbol)  # Use last known bid price
-                                
-                moving_averages = self.get_all_moving_averages(symbol)
+                    if best_bid_price is None:
+                        logging.warning(f"Best bid price is not available for {symbol}. Defaulting to last known bid price, which is also None.")
+                        best_bid_price = 0.0  # Default to 0.0 if None
+
+                # Convert best_bid_price to float to ensure no type mismatches
+                best_bid_price = float(best_bid_price)
+                best_ask_price = float(best_ask_price)
+
+                logging.info(f"Best bid price: {best_bid_price}")
+                logging.info(f"Best ask price: {best_ask_price}")
+
+                # Fetch moving averages with fallback mechanism
+                try:
+                    moving_averages = self.get_all_moving_averages(symbol)
+                except ValueError as e:
+                    logging.info(f"Failed to get new moving averages for {symbol}, using last known values: {e}")
+                    moving_averages = self.last_known_mas.get(symbol, {})  # Continue using last known values if an error occurs
+
+
+                # Ensure the moving averages are valid, fallback to last known if not present
+                ma_3_high = moving_averages.get("ma_3_high", self.last_known_mas.get(symbol, {}).get("ma_3_high", 0.0))
+                ma_3_low = moving_averages.get("ma_3_low", self.last_known_mas.get(symbol, {}).get("ma_3_low", 0.0))
+                ma_6_high = moving_averages.get("ma_6_high", self.last_known_mas.get(symbol, {}).get("ma_6_high", 0.0))
+                ma_6_low = moving_averages.get("ma_6_low", self.last_known_mas.get(symbol, {}).get("ma_6_low", 0.0))
+
+                # Convert moving averages to float to ensure no type mismatches
+                ma_3_high = float(ma_3_high)
+                ma_3_low = float(ma_3_low)
+                ma_6_high = float(ma_6_high)
+                ma_6_low = float(ma_6_low)
+
+                # Log warnings if any of the moving averages are missing
+                if None in [ma_3_high, ma_3_low, ma_6_high, ma_6_low]:
+                    logging.info(f"Missing moving averages for {symbol}. Using fallback values.")
+
+
+                # moving_averages = self.get_all_moving_averages(symbol)
 
                 logging.info(f"Open symbols: {open_symbols}")
                 logging.info(f"Current rotator symbols: {rotator_symbols_standardized}")
@@ -490,6 +558,8 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                     #mfirsi_signal = self.get_mfirsi_ema(symbol, limit=100, lookback=5, ema_period=5)
                     #mfirsi_signal = self.get_mfirsi_ema_secondary_ema(symbol, limit=100, lookback=1, ema_period=5, secondary_ema_period=3)
 
+                    mfirsi_signal = self.exchange.generate_l_signals(symbol)
+
                     funding_rate = metrics['Funding']
                     hma_trend = metrics['HMA Trend']
                     eri_trend = metrics['ERI Trend']
@@ -525,18 +595,30 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
 
 
                     # Adjust risk parameters based on the maximum leverage allowed by the exchange
-                    self.adjust_risk_parameters(exchange_max_leverage=self.max_leverage)
+                    # self.adjust_risk_parameters(exchange_max_leverage=self.max_leverage)
 
                     # Calculate dynamic entry sizes for long and short positions
                     long_dynamic_amount, short_dynamic_amount = self.calculate_dynamic_amounts_notional(
                         symbol=symbol,
                         total_equity=total_equity,
                         best_ask_price=best_ask_price,
-                        best_bid_price=best_bid_price
+                        best_bid_price=best_bid_price,
+                        wallet_exposure_limit_long=wallet_exposure_limit_long,
+                        wallet_exposure_limit_short=wallet_exposure_limit_short
                     )
 
                     logging.info(f"Long dynamic amount: {long_dynamic_amount} for {symbol}")
                     logging.info(f"Short dynamic amount: {short_dynamic_amount} for {symbol}")
+
+                    long_dynamic_amount_helper, short_dynamic_amount_helper = self.calculate_dynamic_amounts_notional_nowelimit(
+                        symbol=symbol,
+                        total_equity=total_equity,
+                        best_bid_price=best_bid_price,
+                        best_ask_price=best_ask_price
+                    )
+
+                    logging.info(f"Long dynamic amount helper: {long_dynamic_amount} for {symbol}")
+                    logging.info(f"Short dynamic amount helper: {short_dynamic_amount} for {symbol}")
 
                     cum_realised_pnl_long = position_data["long"]["cum_realised"]
                     cum_realised_pnl_short = position_data["short"]["cum_realised"]
@@ -697,28 +779,48 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                     logging.info(f"Short take profit for {symbol}: {short_take_profit}")
                     logging.info(f"Long take profit for {symbol}: {long_take_profit}")
 
-                    should_short = self.short_trade_condition(best_ask_price, moving_averages["ma_3_high"])
-                    should_long = self.long_trade_condition(best_bid_price, moving_averages["ma_3_low"])
+                    # Handling best ask price with fallback and type conversion
+                    if 'asks' in order_book and len(order_book['asks']) > 0:
+                        best_ask_price = float(order_book['asks'][0][0])
+                        self.last_known_ask[symbol] = best_ask_price  # Update last known ask price
+                    else:
+                        best_ask_price = self.last_known_ask.get(symbol, 0.0)  # Fallback to 0.0 if not available
+                        if best_ask_price == 0.0:
+                            logging.warning(f"Best ask price is not available for {symbol}. Defaulting to 0.0.")
+
+                    # Handling best bid price with fallback and type conversion
+                    if 'bids' in order_book and len(order_book['bids']) > 0:
+                        best_bid_price = float(order_book['bids'][0][0])
+                        self.last_known_bid[symbol] = best_bid_price  # Update last known bid price
+                    else:
+                        best_bid_price = self.last_known_bid.get(symbol, 0.0)  # Fallback to 0.0 if not available
+                        if best_bid_price == 0.0:
+                            logging.warning(f"Best bid price is not available for {symbol}. Defaulting to 0.0.")
+
+                    # Ensure valid decisions on whether to short or long based on conditions
+                    should_short = self.short_trade_condition(best_ask_price, ma_3_high)
+                    should_long = self.long_trade_condition(best_bid_price, ma_3_low)
+
+                    # Determine if additional shorts should be added
                     should_add_to_short = False
-                    should_add_to_long = False
-
                     if short_pos_price is not None:
-                        should_add_to_short = short_pos_price < moving_averages["ma_6_low"] and self.short_trade_condition(best_ask_price, moving_averages["ma_6_high"])
+                        should_add_to_short = short_pos_price < ma_6_low and self.short_trade_condition(best_ask_price, ma_6_high)
 
+                    # Determine if additional longs should be added
+                    should_add_to_long = False
                     if long_pos_price is not None:
-                        should_add_to_long = long_pos_price > moving_averages["ma_6_high"] and self.long_trade_condition(best_bid_price, moving_averages["ma_6_low"])
-
+                        should_add_to_long = long_pos_price > ma_6_high and self.long_trade_condition(best_bid_price, ma_6_low)
 
                     logging.info(f"Five minute volume for {symbol} : {five_minute_volume}")
                         
-                    historical_data = self.fetch_historical_data(
-                        symbol,
-                        timeframe='4h'
-                    )
+                    # historical_data = self.fetch_historical_data(
+                    #     symbol,
+                    #     timeframe='4h'
+                    # )
 
-                    one_hour_atr_value = self.calculate_atr(historical_data)
+                    # one_hour_atr_value = self.calculate_atr(historical_data)
 
-                    logging.info(f"ATR for {symbol} : {one_hour_atr_value}")
+                    # logging.info(f"ATR for {symbol} : {one_hour_atr_value}")
 
                     tp_order_counts = self.exchange.get_open_tp_order_count(open_orders)
 
@@ -729,26 +831,32 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                         try:
                             unrealized_pnl = self.exchange.fetch_unrealized_pnl(symbol)
                             long_upnl = unrealized_pnl.get('long')
+                            self.last_known_upnl[symbol] = self.last_known_upnl.get(symbol, {})
+                            self.last_known_upnl[symbol]['long'] = long_upnl  # Store the last known long uPNL
                             logging.info(f"Long UPNL for {symbol}: {long_upnl}")
                         except Exception as e:
-                            logging.info(f"Exception fetching Long UPNL for {symbol}: {e}")
+                            # Fallback to last known uPNL if an exception occurs
+                            long_upnl = self.last_known_upnl.get(symbol, {}).get('long', 0.0)
+                            logging.info(f"Exception fetching Long UPNL for {symbol}: {e}. Using last known UPNL: {long_upnl}")
 
                     # Check for short position
                     if short_pos_qty > 0:
                         try:
                             unrealized_pnl = self.exchange.fetch_unrealized_pnl(symbol)
                             short_upnl = unrealized_pnl.get('short')
+                            self.last_known_upnl[symbol] = self.last_known_upnl.get(symbol, {})
+                            self.last_known_upnl[symbol]['short'] = short_upnl  # Store the last known short uPNL
                             logging.info(f"Short UPNL for {symbol}: {short_upnl}")
                         except Exception as e:
-                            logging.info(f"Exception fetching Short UPNL for {symbol}: {e}")
-
+                            # Fallback to last known uPNL if an exception occurs
+                            short_upnl = self.last_known_upnl.get(symbol, {}).get('short', 0.0)
+                            logging.info(f"Exception fetching Short UPNL for {symbol}: {e}. Using last known UPNL: {short_upnl}")
 
                     long_tp_counts = tp_order_counts['long_tp_count']
                     short_tp_counts = tp_order_counts['short_tp_count']
 
                     try:
-                        #self.linear_grid_hardened_gridspan_ob_volumelevels_dynamictp_lsignal(
-                        self.lingrid_v2_gs(
+                        self.lineargrid_base(
                             symbol,
                             open_symbols,
                             total_equity,
@@ -762,11 +870,8 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                             min_outer_price_distance,
                             max_outer_price_distance,
                             reissue_threshold,
-                            self.wallet_exposure_limit,
                             wallet_exposure_limit_long,
                             wallet_exposure_limit_short,
-                            self.user_defined_leverage_long,
-                            self.user_defined_leverage_short,
                             long_mode,
                             short_mode,
                             initial_entry_buffer_pct,
@@ -784,7 +889,12 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                             graceful_stop_long,
                             graceful_stop_short,
                             additional_entries_from_signal,
-                            open_position_data
+                            open_position_data,
+                            drawdown_behavior,
+                            grid_behavior,
+                            stop_loss_long,
+                            stop_loss_short,
+                            stop_loss_enabled
                         )
                     except Exception as e:
                         logging.info(f"Something is up with variables for the grid {e}")
@@ -854,7 +964,7 @@ class BybitDynamicGridSpanOBLevelsLSignal(BybitStrategy):
                     if self.test_orders_enabled and current_time - self.last_helper_order_cancel_time >= self.helper_interval:
                         if symbol in open_symbols:
                             self.helper_active = True
-                            self.helperv2(symbol, short_dynamic_amount, long_dynamic_amount)
+                            self.helperv2(symbol, short_dynamic_amount_helper, long_dynamic_amount_helper)
                         else:
                             logging.info(f"Skipping test orders for {symbol} as it's not in open symbols list.")
                             
