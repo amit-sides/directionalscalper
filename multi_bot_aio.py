@@ -538,22 +538,6 @@ def bybit_auto_rotation(args, market_maker, manager, symbols_allowed):
                 logging.info(f"Active symbols: {active_symbols}")
                 logging.info(f"Unique active symbols: {unique_active_symbols}")
 
-                if target_coins_mode and whitelist:
-                    for whitelisted_symbol in whitelist:
-                        with general_rate_limiter:
-                            mfirsi_signal = market_maker.get_signal(whitelisted_symbol)
-                        logging.info(f"Processing signal for whitelisted symbol {whitelisted_symbol}. MFIRSI signal: {mfirsi_signal}")
-
-                        has_open_long = any(pos['side'].lower() == 'long' and standardize_symbol(pos['symbol']) == whitelisted_symbol for pos in open_position_data)
-                        has_open_short = any(pos['side'].lower() == 'short' and standardize_symbol(pos['symbol']) == whitelisted_symbol for pos in open_position_data)
-
-                        action_taken = handle_signal_targetcoin(whitelisted_symbol, args, manager, mfirsi_signal, open_position_data, symbols_allowed, True, long_mode, short_mode, graceful_stop_long, graceful_stop_short)
-
-                        if action_taken:
-                            logging.info(f"Action taken for whitelisted symbol {whitelisted_symbol}.")
-                        else:
-                            logging.info(f"No action taken for whitelisted symbol {whitelisted_symbol}.")
-
                 # Process signals for open positions
                 for symbol in open_position_symbols.copy():
                     has_open_long = any(pos['side'].lower() == 'long' for pos in open_position_data if standardize_symbol(pos['symbol']) == symbol)
@@ -564,7 +548,7 @@ def bybit_auto_rotation(args, market_maker, manager, symbols_allowed):
 
                     logging.info(f"Long thread running for {symbol}: {long_thread_running}")
                     logging.info(f"Short thread running for {symbol}: {short_thread_running}")
-                    
+
                     # Ensure that we process signals for open positions separately
                     open_position_futures.append(signal_executor.submit(
                         process_signal_for_open_position, 
@@ -645,6 +629,7 @@ def bybit_auto_rotation(args, market_maker, manager, symbols_allowed):
             logging.info(traceback.format_exc())
 
         time.sleep(1)
+
 
 def bybit_auto_rotation_spot(args, market_maker, manager, symbols_allowed):
     global latest_rotator_symbols, active_symbols, last_rotator_update_time
