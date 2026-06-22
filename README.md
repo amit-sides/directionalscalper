@@ -10,7 +10,7 @@ An algorithmic trading framework built using CCXT for multiple exchanges<br>
 
 ### Links
 * Website: https://quantumvoid.org
-* API (BYBIT): https://api.quantumvoid.org/data/quantdatav2_bybit.json
+* API (BYBIT): https://marketapi.voidx.trade/data/quantdatav2_bybit.json
 * Discord: https://discord.gg/4GvHqPxfud
 
 Directional Scalper        |  API Scraper               |  Dashboard                | Directional Scalper Multi | Menu GUI

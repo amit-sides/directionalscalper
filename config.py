@@ -26,7 +26,7 @@ class Messengers(Enum):
 class API(BaseModel):
     filename: str = "quantdatav2.json"
     mode: str = "remote"
-    url: str = "https://api.quantumvoid.org/volumedata/"
+    url: str = "https://marketapi.voidx.trade/volumedata/"
     data_source_exchange: str = "bybit"
 
 

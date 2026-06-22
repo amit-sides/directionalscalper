@@ -76,7 +76,7 @@ class Manager:
             logging.info("API manager mode: remote")
             if len(self.url) < 6:
                 # Adjusting the default URL based on the exchange_name
-                self.url = f"https://api.quantumvoid.org/volumedata/quantdatav2_{self.exchange_name}.json"
+                self.url = f"https://marketapi.voidx.trade/volumedata/quantdatav2_{self.exchange_name}.json"
             logging.info(f"Remote API URL: {self.url}")
             self.data = self.get_remote_data()
 
@@ -149,7 +149,7 @@ class Manager:
         return datetime.now() > self.rotator_symbols_cache_expiry
 
     def get_all_possible_symbols(self, max_retries: int = 5):
-        url = "https://api.quantumvoid.org/volumedata/quantdatav2_bybit.json"
+        url = "https://marketapi.voidx.trade/volumedata/quantdatav2_bybit.json"
         
         for retry in range(max_retries):
             delay = 2**retry  # exponential backoff
@@ -184,7 +184,7 @@ class Manager:
         return []
 
     def get_atrp_sorted_rotator_symbols(self, min_qty_threshold: float = None, blacklist: list = None, whitelist: list = None, max_usd_value: float = None, max_retries: int = 5):
-        url = f"https://api.quantumvoid.org/volumedata/rotatorsymbols_{self.data_source_exchange}_atrp.json"
+        url = f"https://marketapi.voidx.trade/volumedata/rotatorsymbols_{self.data_source_exchange}_atrp.json"
         
         for retry in range(max_retries):
             delay = 2**retry  # exponential backoff
@@ -242,11 +242,11 @@ class Manager:
         return []
 
     def get_bullish_rotator_symbols(self, min_qty_threshold: float = None, blacklist: list = None, whitelist: list = None, max_usd_value: float = None, max_retries: int = 5):
-        url = f"https://api.quantumvoid.org/volumedata/rotatorsymbols_{self.data_source_exchange}_bullish.json"
+        url = f"https://marketapi.voidx.trade/volumedata/rotatorsymbols_{self.data_source_exchange}_bullish.json"
         return self._get_rotator_symbols(url, min_qty_threshold, blacklist, whitelist, max_usd_value, max_retries)
 
     def get_bearish_rotator_symbols(self, min_qty_threshold: float = None, blacklist: list = None, whitelist: list = None, max_usd_value: float = None, max_retries: int = 5):
-        url = f"https://api.quantumvoid.org/volumedata/rotatorsymbols_{self.data_source_exchange}_bearish.json"
+        url = f"https://marketapi.voidx.trade/volumedata/rotatorsymbols_{self.data_source_exchange}_bearish.json"
         return self._get_rotator_symbols(url, min_qty_threshold, blacklist, whitelist, max_usd_value, max_retries)
 
     def _get_rotator_symbols(self, url, min_qty_threshold, blacklist, whitelist, max_usd_value, max_retries):
@@ -310,7 +310,7 @@ class Manager:
     #         return self.rotator_symbols_cache
 
     #     symbols = []
-    #     url = f"https://api.quantumvoid.org/volumedata/rotatorsymbols_{self.data_source_exchange}.json"
+    #     url = f"https://marketapi.voidx.trade/volumedata/rotatorsymbols_{self.data_source_exchange}.json"
         
     #     for retry in range(max_retries):
     #         delay = 2**retry  # exponential backoff
@@ -378,7 +378,7 @@ class Manager:
             return self.rotator_symbols_cache
 
         symbols = []
-        url = f"https://api.quantumvoid.org/volumedata/rotatorsymbols_{self.data_source_exchange}.json"
+        url = f"https://marketapi.voidx.trade/volumedata/rotatorsymbols_{self.data_source_exchange}.json"
         
         for retry in range(max_retries):
             delay = 2**retry  # exponential backoff
@@ -445,7 +445,7 @@ class Manager:
 
     
     def get_symbols(self):
-        url = f"https://api.quantumvoid.org/volumedata/quantdatav2_bybit.json"
+        url = f"https://marketapi.voidx.trade/volumedata/quantdatav2_bybit.json"
         try:
             header, raw_json = send_public_request(url=url)
             if isinstance(raw_json, list):
@@ -566,12 +566,12 @@ class Manager:
         return datetime.now() > self.api_data_cache_expiry
 
     def get_api_data(self, symbol):
-        api_data_url = f"https://api.quantumvoid.org/volumedata/quantdatav2_{self.data_source_exchange}.json"
+        api_data_url = f"https://marketapi.voidx.trade/volumedata/quantdatav2_{self.data_source_exchange}.json"
         data = self.fetch_data_from_url(api_data_url)
         symbols = [asset.get("Asset", "") for asset in data if "Asset" in asset]
 
         # Fetch funding rate data from the new URL
-        funding_data_url = f"https://api.quantumvoid.org/volumedata/funding_{self.data_source_exchange}.json"
+        funding_data_url = f"https://marketapi.voidx.trade/volumedata/funding_{self.data_source_exchange}.json"
         funding_data = self.fetch_data_from_url(funding_data_url)
 
         logging.info(f"Funding data: {funding_data}")
