@@ -271,6 +271,23 @@ def load_config(path):
                 )
         try:
             config_data = Config(**data)
+            
+            accounts_path = Path(__file__).parent / "account.json"
+            if accounts_path.exists():
+                with open(accounts_path) as accounts_file:
+                    accounts_data = json.load(accounts_file)
+                
+                for exch in config_data.exchanges:
+                    if exch.api_key != "":
+                        continue
+                    
+                    for account_exchange in accounts_data.get("exchanges", []):
+                        if account_exchange.get("name") != exch.name or account_exchange.get("account_name") != exch.account_name:
+                            continue
+                        
+                        exch.api_key = account_exchange.get("api_key", "")
+                        exch.api_secret = account_exchange.get("api_secret", "")
+                        exch.passphrase = account_exchange.get("passphrase", None)
 
             # Resolve shared_data_path if it's provided
             if config_data.bot.shared_data_path:
