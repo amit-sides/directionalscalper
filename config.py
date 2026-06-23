@@ -272,7 +272,7 @@ def load_config(path):
         try:
             config_data = Config(**data)
             
-            accounts_path = Path(__file__).parent / "account.json"
+            accounts_path = path.parent / "account.json"
             if accounts_path.exists():
                 with open(accounts_path) as accounts_file:
                     accounts_data = json.load(accounts_file)
